@@ -1,0 +1,21 @@
+# Dependencies & environments
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets & tokens (NEVER commit these)
+client_secrets.json
+token.json
+
+# Media files (large / user-specific)
+input/
+output/
+temp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Upload state
+upload_metadata.json
