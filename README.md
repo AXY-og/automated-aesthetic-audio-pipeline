@@ -1,4 +1,4 @@
-# 🎧 Automated Aesthetic Audio Pipeline (Xenia)
+# 🎧 Automated Aesthetic Audio Pipeline
 
 An end-to-end pipeline for creating **slowed + reverbed + 8D audio** videos and uploading them to YouTube — fully automated.
 
