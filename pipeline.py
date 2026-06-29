@@ -18,7 +18,7 @@ import html
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import fx
-from uploader import authenticate, upload_video
+from uploader import authenticate, upload_video, sanitize_tags
 
 METADATA_FILE = "upload_metadata.json"
 
@@ -31,7 +31,10 @@ def phase_video_generation():
     print("  PHASE 1 — VIDEO GENERATION")
     print("=" * 55)
 
-    result = fx.main()
+    skip = input("\n  Skip all audio effects? (y/n) [default n]: ").strip().lower()
+    skip_effects = skip == "y"
+
+    result = fx.main(skip_effects=skip_effects)
 
     if not result or not os.path.exists(result["video_path"]):
         print("\nVideo generation failed.")
@@ -51,46 +54,46 @@ def phase_video_generation():
 
 def _fetch_lyrics(artist, song):
     """
-    Try to fetch lyrics from the web.  Falls back gracefully.
-    Uses a simple Google scrape for lyrics snippets.
+    Fetch plain (non-timestamped) lyrics from lrclib.net.
+    Falls back to manual paste if not found.
     """
-    # Try lyrics.ovh free API first
     try:
         safe_artist = urllib.parse.quote(artist)
         safe_song = urllib.parse.quote(song)
-        url = f"https://api.lyrics.ovh/v1/{safe_artist}/{safe_song}"
-        req = urllib.request.Request(url, headers={"User-Agent": "XeniaPipeline/1.0"})
+        url = f"https://lrclib.net/api/get?artist_name={safe_artist}&track_name={safe_song}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "xenia-pipeline (https://github.com/AXY-og/automated-aesthetic-audio-pipeline)"
+        })
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
-            lyrics = data.get("lyrics", "").strip()
+            lyrics = data.get("plainLyrics", "").strip()
             if lyrics:
                 return lyrics
     except Exception:
         pass
 
-    # Fallback: let the user paste lyrics manually
     return None
 
 
-# ── Phase 2: Metadata (interactive) ──────────────────────────────────
+# ── Phase 2: Metadata (automated) ────────────────────────────────────
 
-def phase_metadata(source_url):
-    """Prompt for song info and auto-generate upload metadata."""
+def phase_metadata(source_url, artist_name="", song_name="", effects=None,
+                   artist_link="", original_link=""):
+    """Build upload metadata automatically from scraped info."""
     print("\n" + "=" * 55)
     print("  PHASE 2 — UPLOAD METADATA")
     print("=" * 55)
 
-    # ── Collect info ──
-    print()
-    song_name    = input("  Song name: ").strip()
-    artist_name  = input("  Artist name: ").strip()
-    artist_link  = input("  Artist YouTube channel link: ").strip()
+    original_link = original_link or source_url or ""
 
     if not song_name or not artist_name:
         print("  ⚠️  Song name and artist name are required.")
         sys.exit(1)
 
-    original_link = source_url or input("  Original song link: ").strip()
+    print(f"\n  Song:   {song_name}")
+    print(f"  Artist: {artist_name}")
+    if artist_link:
+        print(f"  Channel: {artist_link}")
 
     # ── Fetch lyrics ──
     print(f"\n  Searching lyrics for \"{artist_name} - {song_name}\"...")
@@ -98,24 +101,23 @@ def phase_metadata(source_url):
     if lyrics:
         print("  ✅ Lyrics found!")
     else:
-        print("  ⚠️  Could not auto-fetch lyrics.")
-        print("  Paste the full lyrics below (press Enter twice when done):\n")
-        lines = []
-        while True:
-            line = input()
-            if line == "" and lines and lines[-1] == "":
-                lines.pop()  # remove trailing blank
-                break
-            lines.append(line)
-        lyrics = "\n".join(lines).strip() if lines else "(Lyrics not available)"
+        print("  ⚠️  Could not auto-fetch lyrics. Using placeholder.")
+        lyrics = "(Lyrics not available)"
+
+    # ── Build effects label ──
+    effect_display = {"slow": "slowed", "reverb": "reverbed", "8d": "8d"}
+    if effects:
+        effects_label = " + ".join(effect_display.get(e, e) for e in effects)
+    else:
+        effects_label = "slowed + reverbed + 8d"
 
     # ── Build title ──
-    title = f"{artist_name} - {song_name} (slowed + reverbed + 8d)"
+    title = f"{song_name} ({effects_label}) | {artist_name}"
 
     # ── Build description ──
     description = f"""🎧 Please wear headphones for the full 8D experience. Close your eyes and drift.
 
-{artist_name} - {song_name} (slowed + reverbed + 8d)
+{song_name} ({effects_label}) | {artist_name}
 
 Support the Original Artist:
 Original Song: {artist_name} - {song_name}
@@ -163,6 +165,8 @@ I do not own the music or the artwork used in this video. All rights belong to t
         if key and key not in seen:
             seen.add(key)
             tags.append(t)
+
+    tags = sanitize_tags(tags)
 
     metadata = {
         "title": title,
@@ -301,7 +305,91 @@ def main():
     result = phase_video_generation()
     video_path = result["video_path"]
     source_url = result.get("source_url", "")
-    metadata = phase_metadata(source_url)
+    speed_factor = result.get("speed_factor", 1.0)
+    effects = result.get("effects", [])
+    yt_meta = result.get("yt_meta", {})
+
+    # ── Parse artist / song from scraped YouTube title ──
+    artist_name = yt_meta.get("artist", "")
+    song_name = ""
+    yt_title = yt_meta.get("yt_title", "")
+
+    if yt_title:
+        # Same parsing logic as thumbnail.py — split "Artist - Title"
+        if not artist_name and " - " in yt_title:
+            parts = yt_title.split(" - ", 1)
+            artist_name = parts[0].strip()
+            song_name = parts[1].strip()
+        elif " - " in yt_title:
+            song_name = yt_title.split(" - ", 1)[1].strip()
+        else:
+            song_name = yt_title
+
+        # Clean common video suffixes
+        clean_regex = r'\s*[\(\[][^\]\)]*(official|video|lyric|lyrics|audio|slowed|reverb|8d|music|clip|prod|remix|hd|4k)[^\]\)]*[\)\]]'
+        song_name = re.sub(clean_regex, '', song_name, flags=re.IGNORECASE).strip()
+        artist_name = re.sub(clean_regex, '', artist_name, flags=re.IGNORECASE).strip()
+
+    channel_url = yt_meta.get("channel_url", "")
+
+    # ── Phase 1.5: Subtitles / Lyrics ─────────────────────────────────────
+    print("\n" + "=" * 55)
+    print("  PHASE 1.5 — SUBTITLES / LYRICS")
+    print("=" * 55)
+
+    if artist_name and song_name:
+        print(f"\n  Detected: {artist_name} - {song_name}")
+
+    burn_subs = input("\nDo you want to burn synced subtitles onto the video? (y/n) [default y]: ").strip().lower()
+    if burn_subs != "n":
+        if not artist_name or not song_name:
+            print()
+            artist_name = artist_name or input("  Artist name: ").strip()
+            song_name = song_name or input("  Song name:   ").strip()
+
+        # Speed factor from Phase 1
+        print(f"\n  Detected speed factor from Phase 1: {speed_factor}")
+        speed_raw = input(f"    Playback speed factor [default {speed_factor}]: ").strip()
+        try:
+            chosen_speed = float(speed_raw) if speed_raw else speed_factor
+        except ValueError:
+            print(f"    Invalid float, using default: {speed_factor}")
+            chosen_speed = speed_factor
+
+        import lyrics
+        print(f"\n  Searching synced lyrics for \"{artist_name} - {song_name}\"...")
+        lyrics_res = lyrics.get_lyrics(artist_name, song_name)
+        if lyrics_res and "syncedLyrics" in lyrics_res:
+            print("  ✅ Synced lyrics found!")
+            # Determine subbed path
+            dest_dir = os.path.dirname(video_path)
+            dest_base = os.path.splitext(os.path.basename(video_path))[0]
+            subbed_video_path = os.path.join(dest_dir, f"{dest_base}_subbed.mp4")
+
+            print("  Burning subtitles onto the video...")
+            success = lyrics.burn_subtitles_from_lrc(
+                video_path,
+                lyrics_res["syncedLyrics"],
+                subbed_video_path,
+                speed_factor=chosen_speed
+            )
+            if success and os.path.exists(subbed_video_path):
+                print(f"  ✅ Subtitles burned successfully: {subbed_video_path}")
+                video_path = subbed_video_path
+            else:
+                print("  ❌ Subtitle burning failed. Proceeding with clean video.")
+        else:
+            print("  ❌ Synced lyrics not found. Proceeding with clean video.")
+
+    metadata = phase_metadata(
+        source_url,
+        artist_name=artist_name,
+        song_name=song_name,
+        effects=effects,
+        artist_link=channel_url,
+        original_link=source_url,
+    )
+
     phase_upload(video_path, metadata)
 
 

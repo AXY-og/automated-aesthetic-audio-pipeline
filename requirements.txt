@@ -1,7 +1,11 @@
 pedalboard
 numpy
+scipy
+pyrubberband
 Pillow
+# System dependency: rubberband lib (brew install rubberband)
 yt-dlp
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
+colorthief
