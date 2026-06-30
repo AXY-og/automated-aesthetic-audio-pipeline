@@ -1,6 +1,6 @@
 """
 Thumbnail generator module for Xenia Pipeline.
-Generates a styled 1920x1080 thumbnail using a radial gradient derived from album art,
+Generates a styled 1920x1080 thumbnail using a linear gradient derived from album art,
 a centered square cover image with a drop shadow/glow, and Moontime font styling.
 """
 
@@ -10,8 +10,77 @@ import json
 import subprocess
 import tempfile
 import urllib.request
+import urllib.parse
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+
+def strip_features(name):
+    """Remove featured artist indicators and return only the primary artist.
+
+    Handles: 'Artist, Other', 'Artist feat. Other', 'Artist ft. Other',
+             'Artist (feat. Other)', 'Artist & Other', 'Artist x Other', etc.
+    """
+    if not name:
+        return name
+    # Remove parenthesized/bracketed feat blocks first
+    name = re.sub(r'\s*[\(\[](?:feat\.?|ft\.?|featuring)\s+[^\)\]]*[\)\]]', '', name, flags=re.IGNORECASE).strip()
+    # Split on feat./ft./featuring outside parens
+    name = re.split(r'\s+(?:feat\.?|ft\.?|featuring)\s+', name, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    # Split on comma — keep only the first artist
+    name = name.split(',')[0].strip()
+    # Split on ' & ' or ' x ' — keep only the first artist
+    name = re.split(r'\s+[&x]\s+', name, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    return name
+
+
+def fetch_album_cover(artist, title):
+    """Fetch the actual album cover art from iTunes Search API.
+
+    Returns path to a temporary image file, or None on failure.
+    """
+    try:
+        # Clean artist for search (use primary artist only)
+        search_artist = strip_features(artist)
+        query = f"{search_artist} {title}"
+        encoded = urllib.parse.quote(query)
+        url = f"https://itunes.apple.com/search?term={encoded}&entity=song&limit=5"
+
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "xenia-pipeline/1.0"
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+
+        results = data.get("results", [])
+        if not results:
+            print(f"  ⚠️ No album cover found on iTunes for \"{search_artist} - {title}\"")
+            return None
+
+        # Get the highest-resolution artwork URL (replace 100x100 with 600x600)
+        artwork_url = results[0].get("artworkUrl100", "")
+        if not artwork_url:
+            return None
+        artwork_url = artwork_url.replace("100x100bb", "600x600bb")
+
+        print(f"  ↳ Found album cover: {results[0].get('trackName', '')} — {results[0].get('artistName', '')}")
+
+        # Download to temp file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+        temp_path = temp_file.name
+        temp_file.close()
+
+        req = urllib.request.Request(artwork_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        })
+        with urllib.request.urlopen(req, timeout=10) as response:
+            with open(temp_path, "wb") as out_file:
+                out_file.write(response.read())
+
+        return temp_path
+    except Exception as e:
+        print(f"  ⚠️ Failed to fetch album cover from iTunes: {e}")
+        return None
 
 
 def prompt_hex_colors():
@@ -42,6 +111,7 @@ def extract_metadata(youtube_url):
         artist = input("  Enter artist name: ").strip()
         if not artist:
             raise ValueError("No artist provided. Skipping styled thumbnail.")
+        artist = strip_features(artist)
         thumbnail_url = input("  Enter album art image path or URL (or press Enter to skip): ").strip()
         return title, artist, thumbnail_url
 
@@ -77,6 +147,9 @@ def extract_metadata(youtube_url):
                 best_thumb = max(valid_thumbs, key=lambda t: t.get("width", 0))
                 thumbnail_url = best_thumb.get("url", thumbnail_url)
 
+        # Strip featured artists — keep only primary artist
+        artist = strip_features(artist)
+
         print(f"  ↳ Extracted Title  : \"{title}\"")
         print(f"  ↳ Extracted Artist : \"{artist}\"")
         return title, artist, thumbnail_url
@@ -89,6 +162,7 @@ def extract_metadata(youtube_url):
         artist = input("  Enter artist name: ").strip()
         if not artist:
             raise ValueError("No artist provided. Skipping styled thumbnail.")
+        artist = strip_features(artist)
         thumbnail_url = input("  Enter album art image path or URL (or press Enter to skip): ").strip()
         return title, artist, thumbnail_url
 
@@ -289,11 +363,17 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
     # Step 0: Metadata extraction
     title, artist, thumb_url = extract_metadata(youtube_url)
 
-    # Download thumbnail for color extraction
+    # Try fetching the actual album cover from iTunes for color extraction
+    album_cover_path = fetch_album_cover(artist, title)
+
+    # Download YouTube thumbnail as fallback for color extraction
     temp_art = download_thumbnail(thumb_url)
 
-    # Step 1: Color extraction
-    c1, c2 = extract_colors(temp_art)
+    # Use album cover for colors if available, otherwise fall back to YouTube thumbnail
+    color_source = album_cover_path or temp_art
+
+    # Step 1: Color extraction (from album cover)
+    c1, c2 = extract_colors(color_source)
 
     # Darken colors by 50% for background gradient
     darkened_c1 = darken_color(c1, 0.45)

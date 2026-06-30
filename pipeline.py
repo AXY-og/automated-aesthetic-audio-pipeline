@@ -330,6 +330,10 @@ def main():
         song_name = re.sub(clean_regex, '', song_name, flags=re.IGNORECASE).strip()
         artist_name = re.sub(clean_regex, '', artist_name, flags=re.IGNORECASE).strip()
 
+        # Strip featured artists — keep only the primary artist
+        from thumbnail import strip_features
+        artist_name = strip_features(artist_name)
+
     channel_url = yt_meta.get("channel_url", "")
 
     # ── Phase 1.5: Subtitles / Lyrics ─────────────────────────────────────
