@@ -430,7 +430,7 @@ def main(skip_effects=False):
         if "8d" in effects:
             print("\n[8D]")
             settings["8d"] = {
-                "hz": prompt_float("Pan speed Hz", 0.10)
+                "hz": prompt_float("Pan speed Hz", 0.125)
             }
 
     # Process chain

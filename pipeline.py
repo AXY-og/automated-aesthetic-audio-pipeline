@@ -222,8 +222,8 @@ def _prompt_schedule():
     Returns an ISO 8601 UTC datetime string, or None for immediate upload.
     """
     print()
-    schedule = input("  Schedule upload? (y/n) [default n]: ").strip().lower()
-    if schedule != "y":
+    schedule = input("  Schedule upload? (y/n) [default y]: ").strip().lower()
+    if schedule == "n":
         return None
 
     # ── Pick timezone ──
@@ -340,8 +340,8 @@ def main():
     if artist_name and song_name:
         print(f"\n  Detected: {artist_name} - {song_name}")
 
-    burn_subs = input("\nDo you want to burn synced subtitles onto the video? (y/n) [default y]: ").strip().lower()
-    if burn_subs != "n":
+    burn_subs = input("\nDo you want to burn synced subtitles onto the video? (y/n) [default n]: ").strip().lower()
+    if burn_subs == "y":
         if not artist_name or not song_name:
             print()
             artist_name = artist_name or input("  Artist name: ").strip()
