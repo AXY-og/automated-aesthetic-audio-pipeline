@@ -83,6 +83,33 @@ def fetch_album_cover(artist, title):
         return None
 
 
+def get_pop_gradient(bg_color):
+    """
+    Compute a text gradient (text_start, text_end) that has maximum contrast 
+    and pops out vividly against the given background color.
+    """
+    import colorsys
+    r, g, b = bg_color[0] / 255.0, bg_color[1] / 255.0, bg_color[2] / 255.0
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    
+    # Complementary hue (180 degrees shift)
+    h_comp = (h + 0.5) % 1.0
+    
+    # For text_start: highly saturated/vibrant contrast color, very bright (V=1.0)
+    s_start = 0.40  # 40% saturation for a beautiful vivid tint
+    v_start = 1.0
+    r_start, g_start, b_start = colorsys.hsv_to_rgb(h_comp, s_start, v_start)
+    text_start = (int(r_start * 255), int(g_start * 255), int(b_start * 255))
+    
+    # For text_end: clean off-white with just a subtle touch of the complementary tint
+    s_end = 0.05
+    v_end = 0.98
+    r_end, g_end, b_end = colorsys.hsv_to_rgb(h_comp, s_end, v_end)
+    text_end = (int(r_end * 255), int(g_end * 255), int(b_end * 255))
+    
+    return text_start, text_end
+
+
 def prompt_hex_colors():
     """Prompt the user manually to enter two hex colors if extraction fails."""
     print("\n⚠️ Color extraction failed or could not be completed.")
@@ -195,8 +222,8 @@ def download_thumbnail(url_or_path):
 def extract_colors(art_path):
     """
     Step 1: Extract two vibrant dominant colors using ColorThief.
-    Skips near-black and near-white background colors and picks the two
-    most saturated/vivid colors from the palette for the gradient.
+    Skips near-black and near-white background colors and picks a pair of
+    high-contrast/complementary hues (at least 90 degrees hue difference) if possible.
     """
     print("\n[Step 1] Extracting dominant colors from album art...")
     if not art_path:
@@ -208,41 +235,55 @@ def extract_colors(art_path):
         color_thief = ColorThief(art_path)
         palette = color_thief.get_palette(color_count=8, quality=1)
 
-        def saturation(rgb):
-            """Return HSL saturation (0-1) of an RGB color."""
+        def get_hsv(rgb):
             r, g, b = rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0
-            _, _, s = colorsys.rgb_to_hls(r, g, b)
-            return s
+            return colorsys.rgb_to_hsv(r, g, b)
 
-        def lightness(rgb):
-            """Return HSL lightness (0-1) of an RGB color."""
-            r, g, b = rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0
-            _, l, _ = colorsys.rgb_to_hls(r, g, b)
-            return l
+        # Filter candidates: keep non-neutral, vibrant colors
+        vibrant_candidates = []
+        for c in palette:
+            h, s, v = get_hsv(c)
+            # Filter out near-blacks (v < 0.12), near-whites (v > 0.95), and grayscale (s < 0.15)
+            if v >= 0.12 and v <= 0.95 and s >= 0.15:
+                vibrant_candidates.append((c, h, s, v))
 
-        def vibrancy(rgb):
-            """Score a color by saturation, penalising very dark or very light."""
-            s = saturation(rgb)
-            l = lightness(rgb)
-            # Penalise near-black (l<0.1) and near-white (l>0.9)
-            if l < 0.1 or l > 0.9:
-                return s * 0.1
-            return s * (1 - abs(l - 0.5))
+        if not vibrant_candidates:
+            # Fallback to absolute dominant colors if everything is neutral/monochromatic
+            color1 = palette[0]
+            color2 = palette[1] if len(palette) > 1 else color1
+            print(f"  ↳ Color 1 (RGB): {color1}")
+            print(f"  ↳ Color 2 (RGB): {color2}")
+            return color1, color2
 
-        # Sort palette by vibrancy — most vivid first
-        ranked = sorted(palette, key=vibrancy, reverse=True)
-
-        color1 = ranked[0]
-
-        # Pick a second color that is sufficiently different from the first
+        color1, h1, s1, v1 = vibrant_candidates[0]
         color2 = None
-        for c in ranked[1:]:
-            dist = sum(abs(c[i] - color1[i]) for i in range(3))
-            if dist > 80:
+
+        # Look for a secondary color with a circular hue difference >= 0.25 (90 degrees)
+        for c, h2, s2, v2 in vibrant_candidates[1:]:
+            hue_diff = min(abs(h1 - h2), 1.0 - abs(h1 - h2))
+            if hue_diff >= 0.25:
                 color2 = c
                 break
+
+        # Fallback 1: at least 0.15 hue difference (54 degrees)
         if not color2:
-            color2 = ranked[1] if len(ranked) > 1 else color1
+            for c, h2, s2, v2 in vibrant_candidates[1:]:
+                hue_diff = min(abs(h1 - h2), 1.0 - abs(h1 - h2))
+                if hue_diff >= 0.15:
+                    color2 = c
+                    break
+
+        # Fallback 2: highest RGB distance
+        if not color2:
+            max_dist = -1
+            for c, h2, s2, v2 in vibrant_candidates[1:]:
+                dist = sum(abs(c[i] - color1[i]) for i in range(3))
+                if dist > max_dist:
+                    max_dist = dist
+                    color2 = c
+
+        if not color2:
+            color2 = vibrant_candidates[1][0] if len(vibrant_candidates) > 1 else color1
 
         print(f"  ↳ Color 1 (RGB): {color1}")
         print(f"  ↳ Color 2 (RGB): {color2}")
@@ -467,38 +508,18 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
         artist_font = ImageFont.load_default()
 
     # Step 5: Text color calculation
-    # Average pre-darkening dominant colors
-    avg_color = ((c1[0] + c2[0]) // 2, (c1[1] + c2[1]) // 2, (c1[2] + c2[2]) // 2)
-
-    # Derive complementary hue
-    comp_r = 255 - avg_color[0]
-    comp_g = 255 - avg_color[1]
-    comp_b = 255 - avg_color[2]
-
-    # Soft tint blend (85% white, 15% complement) for the main text tone
-    tint_factor = 0.15
-    text_end = (
-        int(255 * (1 - tint_factor) + comp_r * tint_factor),
-        int(255 * (1 - tint_factor) + comp_g * tint_factor),
-        int(255 * (1 - tint_factor) + comp_b * tint_factor)
-    )
-
-    # Soft warm gold color for gradient start
-    warm_gold = (255, 220, 185)
-    # Blend text color slightly with warm gold for the left side gradient
-    text_start = (
-        int(text_end[0] * 0.75 + warm_gold[0] * 0.25),
-        int(text_end[1] * 0.75 + warm_gold[1] * 0.25),
-        int(text_end[2] * 0.75 + warm_gold[2] * 0.25)
-    )
+    # Compute contrast-maximizing gradients for the title (against darkened_c1)
+    # and the artist (against darkened_c2) to ensure high visibility and clean pop.
+    title_start, title_end = get_pop_gradient(darkened_c1)
+    artist_start, artist_end = get_pop_gradient(darkened_c2)
 
     # Step 6: Text Layout
     print("[Step 6] Drawing text layout...")
     # Centre text vertically within the margin between image edge and canvas edge.
     # Top margin: Y 0–210  → centre = 105   (anchor "mm" = vertical+horizontal centre)
     # Bottom margin: Y 870–1080 → centre = 975
-    draw_gradient_text(canvas, title, title_font, 960, 105, text_start, text_end, anchor="mm", stroke_width=1)
-    draw_gradient_text(canvas, artist, artist_font, 960, 975, text_start, text_end, anchor="mm", stroke_width=1)
+    draw_gradient_text(canvas, title, title_font, 960, 105, title_start, title_end, anchor="mm", stroke_width=1)
+    draw_gradient_text(canvas, artist, artist_font, 960, 975, artist_start, artist_end, anchor="mm", stroke_width=1)
 
     # Step 7: Save output
     print(f"\n[Step 7] Saving final thumbnail to {output_path}...")
