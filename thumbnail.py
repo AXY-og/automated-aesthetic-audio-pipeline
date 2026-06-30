@@ -400,10 +400,7 @@ def draw_gradient_text(canvas, text, font, center_x, y, start_color, end_color, 
     if text_w <= 0 or text_h <= 0:
         return
         
-    # Draw a dark outline on the main canvas first for contrast/readability
-    canvas_draw = ImageDraw.Draw(canvas)
-    # Use a dark outline (stroke_width + 3 for a nice defined boundary)
-    canvas_draw.text((center_x, y), text, font=font, fill=(15, 15, 15), anchor=anchor, stroke_width=stroke_width + 3, stroke_fill=(15, 15, 15))
+
 
     # Create a local mask image with a safe margin to prevent clipping script flourishes
     margin = 50
