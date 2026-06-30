@@ -194,31 +194,55 @@ def download_thumbnail(url_or_path):
 
 def extract_colors(art_path):
     """
-    Step 1: Extract two dominant colors using ColorThief.
-    Prompts user manually on failure.
+    Step 1: Extract two vibrant dominant colors using ColorThief.
+    Skips near-black and near-white background colors and picks the two
+    most saturated/vivid colors from the palette for the gradient.
     """
     print("\n[Step 1] Extracting dominant colors from album art...")
     if not art_path:
         return prompt_hex_colors()
 
     try:
+        import colorsys
         from colorthief import ColorThief
         color_thief = ColorThief(art_path)
-        dominant = color_thief.get_color(quality=1)
-        palette = color_thief.get_palette(color_count=5, quality=1)
+        palette = color_thief.get_palette(color_count=8, quality=1)
 
-        color1 = dominant
+        def saturation(rgb):
+            """Return HSL saturation (0-1) of an RGB color."""
+            r, g, b = rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0
+            _, _, s = colorsys.rgb_to_hls(r, g, b)
+            return s
+
+        def lightness(rgb):
+            """Return HSL lightness (0-1) of an RGB color."""
+            r, g, b = rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0
+            _, l, _ = colorsys.rgb_to_hls(r, g, b)
+            return l
+
+        def vibrancy(rgb):
+            """Score a color by saturation, penalising very dark or very light."""
+            s = saturation(rgb)
+            l = lightness(rgb)
+            # Penalise near-black (l<0.1) and near-white (l>0.9)
+            if l < 0.1 or l > 0.9:
+                return s * 0.1
+            return s * (1 - abs(l - 0.5))
+
+        # Sort palette by vibrancy — most vivid first
+        ranked = sorted(palette, key=vibrancy, reverse=True)
+
+        color1 = ranked[0]
+
+        # Pick a second color that is sufficiently different from the first
         color2 = None
-
-        # Look for a secondary color that is sufficiently different from dominant
-        for c in palette:
+        for c in ranked[1:]:
             dist = sum(abs(c[i] - color1[i]) for i in range(3))
-            if dist > 60:
+            if dist > 80:
                 color2 = c
                 break
-
         if not color2:
-            color2 = palette[1] if len(palette) > 1 else dominant
+            color2 = ranked[1] if len(ranked) > 1 else color1
 
         print(f"  ↳ Color 1 (RGB): {color1}")
         print(f"  ↳ Color 2 (RGB): {color2}")
@@ -375,9 +399,9 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
     # Step 1: Color extraction (from album cover)
     c1, c2 = extract_colors(color_source)
 
-    # Darken colors by 50% for background gradient
-    darkened_c1 = darken_color(c1, 0.45)
-    darkened_c2 = darken_color(c2, 0.45)
+    # Darken colors slightly for background gradient (keep them vibrant)
+    darkened_c1 = darken_color(c1, 0.65)
+    darkened_c2 = darken_color(c2, 0.65)
 
     # Step 2: Linear gradient background (top to bottom)
     canvas = create_linear_gradient(1920, 1080, darkened_c1, darkened_c2)

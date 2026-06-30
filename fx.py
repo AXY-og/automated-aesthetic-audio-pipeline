@@ -36,33 +36,26 @@ def prompt_float(label, default):
 
 def apply_slow(input_path, output_path, speed):
     """
-    Slow down audio using pyrubberband with the R3 (finer) engine
-    and crisp transient preservation.
+    Slow down audio by resampling — pitch drops naturally with the speed
+    reduction, giving the classic vinyl / slowed-and-reverbed sound.
 
-    - OptionEngineFiner: R3 engine, better bass transient coherence
-    - OptionTransientsCrisp: preserves sharp attack on bass hits
+    speed < 1.0 → slower + lower pitch (e.g. 0.85 = 85% speed)
     """
     with AudioFile(input_path) as f:
         audio = f.read(f.frames)  # shape: (channels, samples)
         sr = f.samplerate
 
-    # pyrubberband expects (samples, channels) — transpose from pedalboard's (channels, samples)
-    audio_T = audio.T
+    from scipy.signal import resample
 
-    time_ratio = speed
-    stretched = pyrb.time_stretch(
-        audio_T, sr, time_ratio,
-        rbargs={
-            "--fine": "",           # R3 (finer) engine — better bass transient coherence
-            "--crisp": "6",         # Maximum transient crispness — preserves sharp bass attacks
-        }
-    )
+    # Number of output samples = original / speed  (more samples = slower)
+    n_out = int(audio.shape[1] / speed)
+    channels = []
+    for ch in range(audio.shape[0]):
+        channels.append(resample(audio[ch], n_out).astype(np.float32))
+    slowed = np.stack(channels, axis=0)
 
-    # Transpose back to (channels, samples) for pedalboard
-    stretched = stretched.T.astype(np.float32)
-
-    with AudioFile(output_path, "w", sr, stretched.shape[0]) as f:
-        f.write(stretched)
+    with AudioFile(output_path, "w", sr, slowed.shape[0]) as f:
+        f.write(slowed)
 
 
 def _crossover_split(audio, sr, cutoff_hz=180, order=4):
