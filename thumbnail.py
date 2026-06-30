@@ -298,6 +298,17 @@ def darken_color(rgb, factor=0.5):
     return (int(rgb[0] * factor), int(rgb[1] * factor), int(rgb[2] * factor))
 
 
+def vibrant_boost(rgb):
+    """Boost the saturation and brightness of a color to make it extremely vivid."""
+    import colorsys
+    r, g, b = rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    s = max(s, 0.93)
+    v = max(v, 0.93)
+    r_new, g_new, b_new = colorsys.hsv_to_rgb(h, s, v)
+    return (int(r_new * 255), int(g_new * 255), int(b_new * 255))
+
+
 def create_linear_gradient(width, height, color_top, color_bottom):
     """
     Step 2: Generate a top-to-bottom linear gradient canvas.
@@ -389,17 +400,22 @@ def draw_gradient_text(canvas, text, font, center_x, y, start_color, end_color, 
     if text_w <= 0 or text_h <= 0:
         return
         
+    # Draw a dark outline on the main canvas first for contrast/readability
+    canvas_draw = ImageDraw.Draw(canvas)
+    # Use a dark outline (stroke_width + 3 for a nice defined boundary)
+    canvas_draw.text((center_x, y), text, font=font, fill=(15, 15, 15), anchor=anchor, stroke_width=stroke_width + 3, stroke_fill=(15, 15, 15))
+
     # Create a local mask image with a safe margin to prevent clipping script flourishes
     margin = 50
     mask_w = text_w + 2 * margin
     mask_h = text_h + 2 * margin
-    
+
     mask = Image.new("L", (mask_w, mask_h), 0)
     mask_draw = ImageDraw.Draw(mask)
-    
+
     # Draw the text on the local mask, shifted so it aligns inside the mask bounds
     mask_draw.text((margin - left, margin - top), text, fill=255, font=font, anchor=anchor, stroke_width=stroke_width)
-    
+
     # Create the gradient of the exact mask size
     gradient = Image.new("RGB", (mask_w, mask_h))
     grad_draw = ImageDraw.Draw(gradient)
@@ -409,11 +425,11 @@ def draw_gradient_text(canvas, text, font, center_x, y, start_color, end_color, 
         g = int((1 - ratio) * start_color[1] + ratio * end_color[1])
         b = int((1 - ratio) * start_color[2] + ratio * end_color[2])
         grad_draw.line([(x_pixel, 0), (x_pixel, mask_h)], fill=(r, g, b))
-        
+
     # Paste the gradient onto the canvas using the mask
     paste_x = center_x + left - margin
     paste_y = y + top - margin
-    
+
     canvas.paste(gradient, (int(paste_x), int(paste_y)), mask)
 
 
@@ -440,9 +456,13 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
     # Step 1: Color extraction (from album cover)
     c1, c2 = extract_colors(color_source)
 
-    # Darken colors slightly for background gradient (keep them vibrant)
-    darkened_c1 = darken_color(c1, 0.65)
-    darkened_c2 = darken_color(c2, 0.65)
+    # Boost extracted colors to match the vivid, prominent album cover colors
+    boosted_c1 = vibrant_boost(c1)
+    boosted_c2 = vibrant_boost(c2)
+
+    # Use very minimal darkening so the background remains highly vibrant
+    darkened_c1 = darken_color(boosted_c1, 0.92)
+    darkened_c2 = darken_color(boosted_c2, 0.92)
 
     # Step 2: Linear gradient background (top to bottom)
     canvas = create_linear_gradient(1920, 1080, darkened_c1, darkened_c2)
