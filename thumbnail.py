@@ -124,6 +124,24 @@ def prompt_hex_colors():
         except Exception:
             print("  ❌ Invalid hex color formats. Please use 6-character hex codes (e.g. #1a2b3c).")
 
+def prompt_text_color():
+    """Prompt the user manually to enter a text color, or press Enter for auto contrast."""
+    print("\nSelect text color option:")
+    print("  1) Auto contrast pop gradient [Default]")
+    print("  2) Custom hex color")
+    choice = input("Enter 1 or 2 [default 1]: ").strip()
+    if choice == "2":
+        while True:
+            c = input("  Enter text hex color (e.g. #ffffff or ffffff): ").strip().lstrip('#')
+            try:
+                # Convert to RGB
+                color = (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
+                return color
+            except Exception:
+                print("  ❌ Invalid hex color. Please use a 6-character hex code.")
+    return None
+
+
 
 def extract_metadata(youtube_url):
     """
@@ -447,15 +465,25 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
     # Download YouTube thumbnail as fallback for color extraction
     temp_art = download_thumbnail(thumb_url)
 
-    # Use album cover for colors if available, otherwise fall back to YouTube thumbnail
-    color_source = album_cover_path or temp_art
+    custom_text_rgb = None
+    is_manual = False
+    if not album_cover_path:
+        print("  ⚠️ No album cover found on iTunes.")
+        c1, c2 = prompt_hex_colors()
+        is_manual = True
+        custom_text_rgb = prompt_text_color()
+    else:
+        # Step 1: Color extraction (from album cover)
+        c1, c2 = extract_colors(album_cover_path)
 
-    # Step 1: Color extraction (from album cover)
-    c1, c2 = extract_colors(color_source)
-
-    # Boost extracted colors to match the vivid, prominent album cover colors
-    boosted_c1 = vibrant_boost(c1)
-    boosted_c2 = vibrant_boost(c2)
+    if not is_manual:
+        # Boost extracted colors to match the vivid, prominent album cover colors
+        boosted_c1 = vibrant_boost(c1)
+        boosted_c2 = vibrant_boost(c2)
+    else:
+        # Respect user manual hex inputs exactly
+        boosted_c1 = c1
+        boosted_c2 = c2
 
     # Use very minimal darkening so the background remains highly vibrant
     darkened_c1 = darken_color(boosted_c1, 0.92)
@@ -508,7 +536,19 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
 
     # Step 4: Font setup
     print("\n[Step 4 & 5] Computing text colors and typography...")
-    font_path = "assets/fonts/Moontime.ttf"
+    print("Select typography font:")
+    print("  1) Moontime (Elegant Cursive) [Default]")
+    print("  2) UnifrakturCook (Vintage Blackletter)")
+    font_choice = input("Enter 1 or 2 [default 1]: ").strip()
+
+    if font_choice == "2":
+        font_path = "assets/fonts/UnifrakturCook.ttf"
+        if not os.path.exists(font_path):
+            print("  ⚠️ UnifrakturCook font file missing. Using Moontime.")
+            font_path = "assets/fonts/Moontime.ttf"
+    else:
+        font_path = "assets/fonts/Moontime.ttf"
+
     if not os.path.exists(font_path):
         # Fallback to system cursive or default if font file is missing
         font_path = "/System/Library/Fonts/Supplemental/Apple Chancery.ttf"
@@ -525,10 +565,16 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
         artist_font = ImageFont.load_default()
 
     # Step 5: Text color calculation
-    # Compute contrast-maximizing gradients for the title (against darkened_c1)
-    # and the artist (against darkened_c2) to ensure high visibility and clean pop.
-    title_start, title_end = get_pop_gradient(darkened_c1)
-    artist_start, artist_end = get_pop_gradient(darkened_c2)
+    if custom_text_rgb:
+        title_start = custom_text_rgb
+        title_end = custom_text_rgb
+        artist_start = custom_text_rgb
+        artist_end = custom_text_rgb
+    else:
+        # Compute contrast-maximizing gradients for the title (against darkened_c1)
+        # and the artist (against darkened_c2) to ensure high visibility and clean pop.
+        title_start, title_end = get_pop_gradient(darkened_c1)
+        artist_start, artist_end = get_pop_gradient(darkened_c2)
 
     # Step 6: Text Layout
     print("[Step 6] Drawing text layout...")
