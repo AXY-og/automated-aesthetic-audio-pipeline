@@ -1,7 +1,8 @@
 """
 Thumbnail generator module for Xenia Pipeline.
-Generates a styled 1920x1080 thumbnail using a linear gradient derived from album art,
-a centered square cover image with a drop shadow/glow, and Moontime font styling.
+Generates a styled 1920x1080 thumbnail using a blurred version of the Pinterest
+image as the background, a centered square cover image with optional brightness
+glow, and Moontime / UnifrakturCook font styling.
 """
 
 import os
@@ -11,8 +12,9 @@ import subprocess
 import tempfile
 import urllib.request
 import urllib.parse
+import colorsys
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 
 def strip_features(name):
@@ -83,37 +85,39 @@ def fetch_album_cover(artist, title):
         return None
 
 
+# ── Text color helpers ────────────────────────────────────────────────
+
+
 def get_pop_gradient(bg_color):
     """
-    Compute a text gradient (text_start, text_end) that has maximum contrast 
+    Compute a text gradient (text_start, text_end) that has maximum contrast
     and pops out vividly against the given background color.
     """
-    import colorsys
     r, g, b = bg_color[0] / 255.0, bg_color[1] / 255.0, bg_color[2] / 255.0
     h, s, v = colorsys.rgb_to_hsv(r, g, b)
-    
+
     # Complementary hue (180 degrees shift)
     h_comp = (h + 0.5) % 1.0
-    
+
     # For text_start: highly saturated/vibrant contrast color, very bright (V=1.0)
     s_start = 0.40  # 40% saturation for a beautiful vivid tint
     v_start = 1.0
     r_start, g_start, b_start = colorsys.hsv_to_rgb(h_comp, s_start, v_start)
     text_start = (int(r_start * 255), int(g_start * 255), int(b_start * 255))
-    
+
     # For text_end: clean off-white with just a subtle touch of the complementary tint
     s_end = 0.05
     v_end = 0.98
     r_end, g_end, b_end = colorsys.hsv_to_rgb(h_comp, s_end, v_end)
     text_end = (int(r_end * 255), int(g_end * 255), int(b_end * 255))
-    
+
     return text_start, text_end
 
 
 def prompt_hex_colors():
-    """Prompt the user manually to enter two hex colors if extraction fails."""
-    print("\n⚠️ Color extraction failed or could not be completed.")
-    print("Please enter two dominant colors manually to generate the background gradient.")
+    """Prompt the user manually to enter two hex colors for a flat gradient background."""
+    print("\n⚠️ No image available for blurred background.")
+    print("Please enter two colors manually for a flat gradient background.")
     while True:
         c1 = input("  Enter first hex color (e.g. #ff0055 or ff0055): ").strip().lstrip('#')
         c2 = input("  Enter second hex color (e.g. #00ffaa or 00ffaa): ").strip().lstrip('#')
@@ -141,6 +145,8 @@ def prompt_text_color():
                 print("  ❌ Invalid hex color. Please use a 6-character hex code.")
     return None
 
+
+# ── Metadata extraction ──────────────────────────────────────────────
 
 
 def extract_metadata(youtube_url):
@@ -237,114 +243,159 @@ def download_thumbnail(url_or_path):
         return None
 
 
-def extract_colors(art_path):
+# ── Background generation ────────────────────────────────────────────
+
+
+def create_blurred_bg(image_path, width=1920, height=1080, blur_radius=70, darken=0.55):
     """
-    Step 1: Extract two vibrant dominant colors using ColorThief.
-    Skips near-black and near-white background colors and picks a pair of
-    high-contrast/complementary hues (at least 90 degrees hue difference) if possible.
+    Create an aesthetic blurred background from the source image.
+    Scales the image to cover 1920x1080, applies heavy Gaussian blur,
+    and darkens slightly for text readability.
     """
-    print("\n[Step 1] Extracting dominant colors from album art...")
-    if not art_path:
-        return prompt_hex_colors()
+    print("[Step 1] Creating blurred image background...")
+    img = Image.open(image_path).convert("RGB")
+    img_w, img_h = img.size
 
-    try:
-        import colorsys
-        from colorthief import ColorThief
-        color_thief = ColorThief(art_path)
-        palette = color_thief.get_palette(color_count=8, quality=1)
+    # Scale to cover the target dimensions (crop-to-fill)
+    target_ratio = width / height
+    img_ratio = img_w / img_h
 
-        def get_hsv(rgb):
-            r, g, b = rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0
-            return colorsys.rgb_to_hsv(r, g, b)
+    if img_ratio > target_ratio:
+        # Image is wider — scale by height, crop width
+        new_h = height
+        new_w = int(img_w * (height / img_h))
+    else:
+        # Image is taller — scale by width, crop height
+        new_w = width
+        new_h = int(img_h * (width / img_w))
 
-        # Filter candidates: keep non-neutral, vibrant colors
-        vibrant_candidates = []
-        for c in palette:
-            h, s, v = get_hsv(c)
-            # Filter out near-blacks (v < 0.12), near-whites (v > 0.95), and grayscale (s < 0.15)
-            if v >= 0.12 and v <= 0.95 and s >= 0.15:
-                vibrant_candidates.append((c, h, s, v))
+    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-        if not vibrant_candidates:
-            # Fallback to absolute dominant colors if everything is neutral/monochromatic
-            color1 = palette[0]
-            color2 = palette[1] if len(palette) > 1 else color1
-            print(f"  ↳ Color 1 (RGB): {color1}")
-            print(f"  ↳ Color 2 (RGB): {color2}")
-            return color1, color2
+    # Center crop to exactly 1920x1080
+    left = (new_w - width) // 2
+    top = (new_h - height) // 2
+    img = img.crop((left, top, left + width, top + height))
 
-        color1, h1, s1, v1 = vibrant_candidates[0]
-        color2 = None
+    # Apply heavy Gaussian blur
+    img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
 
-        # Look for a secondary color with a circular hue difference >= 0.25 (90 degrees)
-        for c, h2, s2, v2 in vibrant_candidates[1:]:
-            hue_diff = min(abs(h1 - h2), 1.0 - abs(h1 - h2))
-            if hue_diff >= 0.25:
-                color2 = c
-                break
+    # Darken for text contrast
+    if darken < 1.0:
+        enhancer = ImageEnhance.Brightness(img)
+        img = enhancer.enhance(darken)
 
-        # Fallback 1: at least 0.15 hue difference (54 degrees)
-        if not color2:
-            for c, h2, s2, v2 in vibrant_candidates[1:]:
-                hue_diff = min(abs(h1 - h2), 1.0 - abs(h1 - h2))
-                if hue_diff >= 0.15:
-                    color2 = c
-                    break
+    # Slightly boost saturation so the blurred colors stay rich
+    sat_enhancer = ImageEnhance.Color(img)
+    img = sat_enhancer.enhance(1.3)
 
-        # Fallback 2: highest RGB distance
-        if not color2:
-            max_dist = -1
-            for c, h2, s2, v2 in vibrant_candidates[1:]:
-                dist = sum(abs(c[i] - color1[i]) for i in range(3))
-                if dist > max_dist:
-                    max_dist = dist
-                    color2 = c
-
-        if not color2:
-            color2 = vibrant_candidates[1][0] if len(vibrant_candidates) > 1 else color1
-
-        print(f"  ↳ Color 1 (RGB): {color1}")
-        print(f"  ↳ Color 2 (RGB): {color2}")
-        return color1, color2
-    except Exception as e:
-        print(f"  ⚠️ Color Thief extraction failed: {e}")
-        return prompt_hex_colors()
+    print(f"  ↳ Blurred background created ({width}x{height}, blur={blur_radius})")
+    return img
 
 
-def darken_color(rgb, factor=0.5):
-    """Darken RGB color by a factor (e.g. 0.5 reduces brightness by 50%)."""
-    return (int(rgb[0] * factor), int(rgb[1] * factor), int(rgb[2] * factor))
-
-
-def vibrant_boost(rgb):
-    """Boost the saturation and brightness of a color to make it extremely vivid."""
-    import colorsys
-    r, g, b = rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0
-    h, s, v = colorsys.rgb_to_hsv(r, g, b)
-    s = max(s, 0.93)
-    v = max(v, 0.93)
-    r_new, g_new, b_new = colorsys.hsv_to_rgb(h, s, v)
-    return (int(r_new * 255), int(g_new * 255), int(b_new * 255))
-
-
-def create_linear_gradient(width, height, color_top, color_bottom):
+def create_flat_gradient(width, height, color_top, color_bottom):
     """
-    Step 2: Generate a top-to-bottom linear gradient canvas.
+    Fallback: Generate a flat top-to-bottom linear gradient canvas
+    when no image is available.
     """
-    print("[Step 2] Generating background top-to-bottom linear gradient...")
-    # Create a 1D vertical gradient of shape (height, 1)
+    print("[Step 1] Generating flat gradient background (fallback)...")
     t = np.linspace(0, 1, height)[:, None]
-    
+
     r = (1 - t) * color_top[0] + t * color_bottom[0]
     g = (1 - t) * color_top[1] + t * color_bottom[1]
     b = (1 - t) * color_top[2] + t * color_bottom[2]
-    
-    # Stack to shape (height, 1, 3)
+
     column = np.stack([r, g, b], axis=-1).astype(np.uint8)
-    
-    # Broadcast across width
     rgb = np.tile(column, (1, width, 1))
     return Image.fromarray(rgb)
+
+
+# ── Brightness glow ──────────────────────────────────────────────────
+
+
+def create_brightness_glow(center_img, canvas_size=(1920, 1080), scale=1.6,
+                           blur_radius=45, brightness=1.5, saturation=1.4):
+    """
+    Create a luminous aura/halo behind the center image.
+    Takes the center image, scales it up, blurs heavily, boosts brightness
+    and saturation, and returns as an RGBA image ready to composite.
+    """
+    w, h = center_img.size
+    glow_w = int(w * scale)
+    glow_h = int(h * scale)
+
+    # Scale up the center image
+    glow = center_img.copy().resize((glow_w, glow_h), Image.Resampling.LANCZOS)
+
+    # Apply heavy blur
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+    # Boost brightness
+    glow = ImageEnhance.Brightness(glow).enhance(brightness)
+
+    # Boost saturation
+    glow = ImageEnhance.Color(glow).enhance(saturation)
+
+    # Create an RGBA version with soft alpha edges (feathered)
+    # Use a radial gradient mask for smooth falloff
+    mask = Image.new("L", (glow_w, glow_h), 0)
+    mask_draw = ImageDraw.Draw(mask)
+
+    # Draw an elliptical gradient mask — bright center, transparent edges
+    cx, cy = glow_w // 2, glow_h // 2
+    max_radius = max(cx, cy)
+    for i in range(max_radius, 0, -1):
+        # Alpha falls off from 200 at center to 0 at edges
+        alpha = int(200 * (i / max_radius) ** 0.6)
+        bbox = [cx - i, cy - i, cx + i, cy + i]
+        mask_draw.ellipse(bbox, fill=alpha)
+
+    glow_rgba = glow.convert("RGBA")
+    glow_rgba.putalpha(mask)
+
+    # Create canvas-sized RGBA to paste glow centered
+    result = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+    paste_x = (canvas_size[0] - glow_w) // 2
+    paste_y = (canvas_size[1] - glow_h) // 2
+    result.paste(glow_rgba, (paste_x, paste_y), glow_rgba)
+
+    return result
+
+
+# ── Vignette overlay ─────────────────────────────────────────────────
+
+
+def create_vignette_overlay(width=1920, height=1080, strength=0.45):
+    """
+    Create a subtle radial vignette overlay (dark edges, clear center).
+    Returns an RGBA image to composite on top of the final canvas.
+    """
+    # Create a radial gradient mask
+    cx, cy = width // 2, height // 2
+    max_dist = (cx ** 2 + cy ** 2) ** 0.5
+
+    # Build the vignette as a numpy array for speed
+    y_coords = np.arange(height)
+    x_coords = np.arange(width)
+    yy, xx = np.meshgrid(y_coords, x_coords, indexing='ij')
+
+    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    # Normalize distance to [0, 1]
+    normalized = dist / max_dist
+
+    # Apply a smooth falloff curve — stays clear in the center, darkens at edges
+    # Using power curve for natural-looking vignette
+    vignette = np.clip(normalized ** 1.8 * strength * 255, 0, 255).astype(np.uint8)
+
+    # Create black RGBA overlay with vignette as alpha
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    black_layer = Image.new("RGBA", (width, height), (0, 0, 0, 255))
+    mask = Image.fromarray(vignette, mode="L")
+    overlay = Image.composite(black_layer, overlay, mask)
+
+    return overlay
+
+
+# ── Drop shadow for center image ─────────────────────────────────────
 
 
 def create_glow_image(size=800, inner_size=660, spread=16, blur=30, max_alpha=0.5):
@@ -352,30 +403,33 @@ def create_glow_image(size=800, inner_size=660, spread=16, blur=30, max_alpha=0.
     # Create L mask image
     mask = Image.new("L", (size, size), 0)
     mask_draw = ImageDraw.Draw(mask)
-    
+
     # Shadow box dimensions
     shadow_w = inner_size + 2 * spread
-    
+
     # Calculate box coordinates centered on size x size canvas
     offset = (size - shadow_w) // 2
     x0 = offset
     y0 = offset
     x1 = size - offset
     y1 = size - offset
-    
+
     # Fill solid center with max_alpha intensity
     intensity = int(max_alpha * 255)
     mask_draw.rectangle([x0, y0, x1, y1], fill=intensity)
-    
+
     # Apply Gaussian blur
     if blur > 0:
         mask = mask.filter(ImageFilter.GaussianBlur(blur))
-        
+
     # Convert mask to RGBA black shadow image
     rgba = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     black = Image.new("RGBA", (size, size), (0, 0, 0, 255))
     rgba = Image.composite(black, rgba, mask)
     return rgba
+
+
+# ── Image utilities ──────────────────────────────────────────────────
 
 
 def center_crop_to_square(img, target_size=660):
@@ -388,6 +442,9 @@ def center_crop_to_square(img, target_size=660):
     bottom = top + min_dim
     cropped = img.crop((left, top, right, bottom))
     return cropped.resize((target_size, target_size), Image.Resampling.LANCZOS)
+
+
+# ── Typography ───────────────────────────────────────────────────────
 
 
 def get_scaled_font(font_path, text, max_width=1700, default_size=200):
@@ -410,15 +467,13 @@ def draw_gradient_text(canvas, text, font, center_x, y, start_color, end_color, 
     dummy = Image.new("L", (1, 1))
     dummy_draw = ImageDraw.Draw(dummy)
     bbox = dummy_draw.textbbox((0, 0), text, font=font, anchor=anchor, stroke_width=stroke_width)
-    
+
     left, top, right, bottom = bbox
     text_w = right - left
     text_h = bottom - top
-    
+
     if text_w <= 0 or text_h <= 0:
         return
-        
-
 
     # Create a local mask image with a safe margin to prevent clipping script flourishes
     margin = 50
@@ -448,9 +503,26 @@ def draw_gradient_text(canvas, text, font, center_x, y, start_color, end_color, 
     canvas.paste(gradient, (int(paste_x), int(paste_y)), mask)
 
 
+# ── Average color helper ─────────────────────────────────────────────
+
+
+def _avg_color_of_region(canvas, x, y, w, h):
+    """Sample the average RGB color from a rectangular region of the canvas."""
+    region = canvas.crop((x, y, x + w, y + h))
+    arr = np.array(region)
+    avg_r = int(arr[:, :, 0].mean())
+    avg_g = int(arr[:, :, 1].mean())
+    avg_b = int(arr[:, :, 2].mean())
+    return (avg_r, avg_g, avg_b)
+
+
+# ── Main generation ──────────────────────────────────────────────────
+
+
 def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
     """
     Main entry point: Generates a 1920x1080 thumbnail image.
+    Uses a blurred version of the Pinterest image as the background.
     """
     print("\n" + "=" * 55)
     print("  XENIA THUMBNAIL GENERATOR")
@@ -459,43 +531,11 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
     # Step 0: Metadata extraction
     title, artist, thumb_url = extract_metadata(youtube_url)
 
-    # Try fetching the actual album cover from iTunes for color extraction
-    album_cover_path = fetch_album_cover(artist, title)
-
-    # Download YouTube thumbnail as fallback for color extraction
+    # Download YouTube thumbnail as fallback
     temp_art = download_thumbnail(thumb_url)
 
-    custom_text_rgb = None
-    is_manual = False
-    if not album_cover_path:
-        print("  ⚠️ No album cover found on iTunes.")
-        c1, c2 = prompt_hex_colors()
-        is_manual = True
-        custom_text_rgb = prompt_text_color()
-    else:
-        # Step 1: Color extraction (from album cover)
-        c1, c2 = extract_colors(album_cover_path)
-
-    if not is_manual:
-        # Boost extracted colors to match the vivid, prominent album cover colors
-        boosted_c1 = vibrant_boost(c1)
-        boosted_c2 = vibrant_boost(c2)
-    else:
-        # Respect user manual hex inputs exactly
-        boosted_c1 = c1
-        boosted_c2 = c2
-
-    # Use very minimal darkening so the background remains highly vibrant
-    darkened_c1 = darken_color(boosted_c1, 0.92)
-    darkened_c2 = darken_color(boosted_c2, 0.92)
-
-    # Step 2: Linear gradient background (top to bottom)
-    canvas = create_linear_gradient(1920, 1080, darkened_c1, darkened_c2)
-
-    # Step 3: Central image & soft glow
-    print("\n[Step 3] Processing central image and glow...")
-    
-    # Automatically look for Pinterest image in input/ if not provided
+    # ── Determine center image ──
+    print("\n[Step 0b] Locating center image...")
     chosen_center_image = pinterest_image_path
     if not chosen_center_image or not os.path.exists(chosen_center_image):
         import glob
@@ -508,7 +548,7 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
 
     if not chosen_center_image or not os.path.exists(chosen_center_image):
         if temp_art and os.path.exists(temp_art):
-            print("  ↳ No Pinterest image found in input/. Using downloaded YouTube thumbnail as central image.")
+            print("  ↳ No Pinterest image found. Using downloaded YouTube thumbnail.")
             chosen_center_image = temp_art
         else:
             raise FileNotFoundError("No Pinterest cover image found in input/ and no YouTube fallback available.")
@@ -519,23 +559,56 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
         print(f"  ❌ Failed to open center image '{chosen_center_image}': {e}")
         raise
 
+    # ── Step 1: Background ──
+    # Use blurred Pinterest image as the background (always aesthetic)
+    if chosen_center_image and os.path.exists(chosen_center_image):
+        canvas = create_blurred_bg(chosen_center_image)
+    else:
+        # Absolute fallback: flat gradient from manual hex colors
+        c1, c2 = prompt_hex_colors()
+        canvas = create_flat_gradient(1920, 1080, c1, c2)
+
+    # Convert canvas to RGBA for compositing
+    canvas = canvas.convert("RGBA")
+
+    # ── Optional effects prompt ──
+    print("\nOptional thumbnail effects:")
+    glow_choice = input("  Add brightness glow behind center image? (y/n) [default n]: ").strip().lower()
+    use_glow = glow_choice == "y"
+
+    vignette_choice = input("  Add subtle vignette to edges? (y/n) [default n]: ").strip().lower()
+    use_vignette = vignette_choice == "y"
+
+    # ── Text color prompt ──
+    custom_text_rgb = prompt_text_color()
+
+    # ── Step 2: Center image ──
+    print("\n[Step 2] Processing central image...")
     central_img = center_crop_to_square(pint_img, target_size=660)
 
-    # Draw glow behind the image
-    glow_img = create_glow_image(size=800, inner_size=660, spread=16, blur=30, max_alpha=0.5)
+    # ── Step 3: Brightness glow (optional) ──
+    if use_glow:
+        print("[Step 3] Adding brightness glow...")
+        glow_layer = create_brightness_glow(central_img, canvas_size=(1920, 1080))
+        canvas = Image.alpha_composite(canvas, glow_layer)
+        print("  ↳ Brightness glow applied")
+    else:
+        print("[Step 3] Brightness glow: skipped")
 
-    # Paste glow centered at (960, 540)
+    # ── Drop shadow behind center image ──
+    glow_img = create_glow_image(size=800, inner_size=660, spread=16, blur=30, max_alpha=0.5)
     glow_x = (1920 - 800) // 2
     glow_y = (1080 - 800) // 2
     canvas.paste(glow_img, (glow_x, glow_y), glow_img)
 
-    # Paste central square image centered at (960, 540)
+    # ── Paste center image ──
     central_x = (1920 - 660) // 2
     central_y = (1080 - 660) // 2
-    canvas.paste(central_img, (central_x, central_y))
+    central_rgba = central_img.convert("RGBA")
+    canvas.paste(central_rgba, (central_x, central_y), central_rgba)
 
-    # Step 4: Font setup
-    print("\n[Step 4 & 5] Computing text colors and typography...")
+    # ── Step 4: Font setup ──
+    print("\n[Step 4] Typography setup...")
     print("Select typography font:")
     print("  1) Moontime (Elegant Cursive) [Default]")
     print("  2) UnifrakturCook (Vintage Blackletter)")
@@ -564,32 +637,48 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
         title_font = ImageFont.load_default()
         artist_font = ImageFont.load_default()
 
-    # Step 5: Text color calculation
+    # ── Step 5: Text color calculation ──
+    print("[Step 5] Computing text colors...")
+    # Convert canvas to RGB for color sampling
+    canvas_rgb = canvas.convert("RGB")
+
     if custom_text_rgb:
         title_start = custom_text_rgb
         title_end = custom_text_rgb
         artist_start = custom_text_rgb
         artist_end = custom_text_rgb
     else:
-        # Compute contrast-maximizing gradients for the title (against darkened_c1)
-        # and the artist (against darkened_c2) to ensure high visibility and clean pop.
-        title_start, title_end = get_pop_gradient(darkened_c1)
-        artist_start, artist_end = get_pop_gradient(darkened_c2)
+        # Sample the average color from the top and bottom regions of the canvas
+        # where the title and artist text will be placed
+        top_bg = _avg_color_of_region(canvas_rgb, 0, 0, 1920, 210)
+        bottom_bg = _avg_color_of_region(canvas_rgb, 0, 870, 1920, 210)
 
-    # Step 6: Text Layout
+        title_start, title_end = get_pop_gradient(top_bg)
+        artist_start, artist_end = get_pop_gradient(bottom_bg)
+
+    # ── Step 6: Text layout ──
     print("[Step 6] Drawing text layout...")
     # Centre text vertically within the margin between image edge and canvas edge.
     # Top margin: Y 0–210  → centre = 105   (anchor "mm" = vertical+horizontal centre)
     # Bottom margin: Y 870–1080 → centre = 975
-    draw_gradient_text(canvas, title, title_font, 960, 105, title_start, title_end, anchor="mm", stroke_width=1)
-    draw_gradient_text(canvas, artist, artist_font, 960, 975, artist_start, artist_end, anchor="mm", stroke_width=1)
+    draw_gradient_text(canvas_rgb, title, title_font, 960, 105, title_start, title_end, anchor="mm", stroke_width=1)
+    draw_gradient_text(canvas_rgb, artist, artist_font, 960, 975, artist_start, artist_end, anchor="mm", stroke_width=1)
 
-    # Step 7: Save output
+    # ── Step 6b: Vignette (optional, applied last) ──
+    if use_vignette:
+        print("[Step 6b] Applying vignette overlay...")
+        canvas_rgba = canvas_rgb.convert("RGBA")
+        vignette = create_vignette_overlay(1920, 1080, strength=0.45)
+        canvas_rgba = Image.alpha_composite(canvas_rgba, vignette)
+        canvas_rgb = canvas_rgba.convert("RGB")
+        print("  ↳ Vignette applied")
+
+    # ── Step 7: Save output ──
     print(f"\n[Step 7] Saving final thumbnail to {output_path}...")
     try:
         # Ensure parent directories exist
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        canvas.save(output_path, "PNG")
+        canvas_rgb.save(output_path, "PNG")
         print("  ✅ Thumbnail generation complete!")
     finally:
         # Clean up temp thumbnail if downloaded

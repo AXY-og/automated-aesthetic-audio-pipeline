@@ -215,16 +215,24 @@ RESOLUTION_PROFILES = {
 }
 
 
-def combine(image_path, audio_path, output_path, profile, youtube_url=None):
-    # Generate 16:9 thumbnail in output/ first so we can use it as the video background!
+def combine(image_path, audio_path, output_path, profile, youtube_url=None, existing_thumb=None):
+    # Use the pre-generated thumbnail if available (avoids double generation)
     thumb_path = os.path.splitext(output_path)[0] + ".png"
-    try:
-        import thumbnail
-        thumbnail.generate_thumbnail(youtube_url, image_path, thumb_path)
-        print(f"  ✅ Generated premium 16:9 thumbnail: {os.path.basename(thumb_path)}")
+
+    if existing_thumb and os.path.exists(existing_thumb):
+        # Thumbnail was already generated earlier — just use it
+        video_bg = existing_thumb
+        # Copy to expected thumb_path location if different
+        if os.path.abspath(existing_thumb) != os.path.abspath(thumb_path):
+            import shutil as _shutil
+            _shutil.copy2(existing_thumb, thumb_path)
+        print(f"  ✅ Using pre-generated thumbnail: {os.path.basename(video_bg)}")
+    elif os.path.exists(thumb_path):
         video_bg = thumb_path
-    except Exception as e:
-        print(f"  ⚠️ Styled thumbnail generation failed ({e}). Falling back to simple thumbnail...")
+        print(f"  ✅ Using existing thumbnail: {os.path.basename(thumb_path)}")
+    else:
+        # No pre-generated thumbnail — create a simple scaled fallback
+        print("  ⚠️ No pre-generated thumbnail found. Creating simple fallback...")
         try:
             from PIL import Image
             img = Image.open(image_path)
@@ -459,12 +467,14 @@ def main(skip_effects=False):
     profile = RESOLUTION_PROFILES[res_choice]
     print(f"  ↳ Selected: {profile['label']}")
 
-    # Combine
+    # Combine — pass any pre-generated thumbnail to avoid double generation
     name = os.path.splitext(os.path.basename(audio))[0]
     output_path = os.path.join(OUTPUT_DIR, f"{name}.mp4")
+    existing_thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
 
     print("Combining audio and image...")
-    combine(image, current, output_path, profile, youtube_url=source_url)
+    combine(image, current, output_path, profile, youtube_url=source_url,
+            existing_thumb=existing_thumb_path if os.path.exists(existing_thumb_path) else None)
 
     shutil.rmtree(TEMP_DIR)
     print(f"\nDone → {output_path}")
