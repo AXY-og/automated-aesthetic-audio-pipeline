@@ -106,16 +106,27 @@ def phase_metadata(source_url, artist_name="", song_name="", effects=None,
 
     # ── Build effects label ──
     effect_display = {"slow": "slowed", "reverb": "reverbed", "8d": "8d"}
-    if effects:
-        effects_label = " + ".join(effect_display.get(e, e) for e in effects)
+    if effects is not None:
+        if effects:
+            effects_label = " + ".join(effect_display.get(e, e) for e in effects)
+        else:
+            effects_label = "clean"
     else:
         effects_label = "slowed + reverbed + 8d"
+
+    # ── Determine if 8D was applied ──
+    has_8d = (effects is None) or ("8d" in effects)
 
     # ── Build title ──
     title = f"{song_name} ({effects_label}) | {artist_name}"
 
     # ── Build description ──
-    description = f"""🎧 Please wear headphones for the full 8D experience. Close your eyes and drift.
+    desc_intro = "🎧 Please wear headphones for the full 8D experience. Close your eyes and drift." if has_8d else "Close your eyes and drift."
+    desc_tags = (f"#{artist_name.replace(' ', '')} #{song_name.replace(' ', '')} #slowedandreverb #8daudio #slowed #lofi #aesthetic #8dmusic #vibes" 
+                 if has_8d else 
+                 f"#{artist_name.replace(' ', '')} #{song_name.replace(' ', '')} #slowedandreverb #slowed #lofi #aesthetic #vibes")
+
+    description = f"""{desc_intro}
 
 {song_name} ({effects_label}) | {artist_name}
 
@@ -131,7 +142,7 @@ Lyrics:
 {lyrics}
 
 Tags:
-#{artist_name.replace(' ', '')} #{song_name.replace(' ', '')} #slowedandreverb #8daudio #slowed #lofi #aesthetic #8dmusic #vibes
+{desc_tags}
 
 Disclaimer:
 I do not own the music or the artwork used in this video. All rights belong to their respective owners. This video is purely fan-made for entertainment and immersive listening purposes. If any producer, label, or artist has an issue with this upload, please contact me directly at fakexenia123@gmail.com  I will remove it immediately."""
@@ -139,23 +150,29 @@ I do not own the music or the artwork used in this video. All rights belong to t
     # ── Build tags list ──
     # Default tags (always present on every video)
     default_tags = [
-        "music", "audio", "reverbed", "8d", "slowed",
+        "music", "audio", "reverbed", "slowed",
         "slow", "reverb", "song", "songs", "hot", "sexy",
         "hot audio", "sexy audio", "lofi", "beat", "lofi girl",
         "surround", "sound", "surround sound",
         "track", "chick", "art", "pic", "guitar", "vibes",
         "slowedandreverbed", "slowandreverb", "xenia", "aesthetic",
-        "experience",
     ]
+    if has_8d:
+        default_tags.extend(["8d", "experience"])
 
     # Per-video dynamic tags
     video_tags = [
         artist_name, song_name,
         f"{artist_name} slowed", f"{song_name} slowed",
-        f"{artist_name} {song_name}", f"{artist_name} 8d",
+        f"{artist_name} {song_name}",
         f"{song_name} slowed reverb",
-        "slowed and reverb", "8d audio", "8d music", "headphones",
+        "slowed and reverb",
     ]
+    if has_8d:
+        video_tags.extend([
+            f"{artist_name} 8d",
+            "8d audio", "8d music", "headphones",
+        ])
 
     # Merge and deduplicate (preserving order)
     seen = set()
