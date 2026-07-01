@@ -330,6 +330,41 @@ class CropperApp:
 
         self._update_grade_buttons()
 
+        # ── adjust toolbar ──
+        self._adjust_frame = tk.Frame(self.root, bg="#16213e", pady=4, padx=8)
+        self._adjust_frame.pack(fill=tk.X)
+
+        tk.Label(self._adjust_frame, text="Adjustments:", font=("Helvetica", 11, "bold"),
+                 bg="#16213e", fg="#8c92ac").pack(side=tk.LEFT, padx=(4, 8))
+
+        slider_style = {
+            "orient": tk.HORIZONTAL, "bg": "#16213e", "fg": "white",
+            "highlightthickness": 0, "activebackground": "#533483",
+            "troughcolor": "#1a1a2e", "font": ("Helvetica", 9),
+            "showvalue": True, "length": 120,
+            "command": lambda val: self._render()
+        }
+
+        self.sat_slider = tk.Scale(self._adjust_frame, label="Saturation", from_=0, to=200, **slider_style)
+        self.sat_slider.set(100)
+        self.sat_slider.pack(side=tk.LEFT, padx=6)
+
+        self.contrast_slider = tk.Scale(self._adjust_frame, label="Contrast", from_=50, to=150, **slider_style)
+        self.contrast_slider.set(100)
+        self.contrast_slider.pack(side=tk.LEFT, padx=6)
+
+        self.vignette_slider = tk.Scale(self._adjust_frame, label="Vignette", from_=0, to=100, **slider_style)
+        self.vignette_slider.set(0)
+        self.vignette_slider.pack(side=tk.LEFT, padx=6)
+
+        self.glow_slider = tk.Scale(self._adjust_frame, label="Glow", from_=0, to=100, **slider_style)
+        self.glow_slider.set(0)
+        self.glow_slider.pack(side=tk.LEFT, padx=6)
+
+        self.sparkle_slider = tk.Scale(self._adjust_frame, label="Sparkles", from_=0, to=100, **slider_style)
+        self.sparkle_slider.set(0)
+        self.sparkle_slider.pack(side=tk.LEFT, padx=6)
+
         # ── canvas ──
         self.canvas = tk.Canvas(self.root, width=CANVAS_W, height=CANVAS_H,
                                 bg="#1a1a2e", highlightthickness=0, cursor="crosshair")
@@ -611,10 +646,158 @@ class CropperApp:
             img = self._add_vignette(img, strength=self._get_filter_intensity() * 0.8)
         return img
 
-    # ── main color grade dispatcher ────────────────────────────────────
+    @staticmethod
+    def _add_glow(img, amount=0.0):
+        """Apply Orton-style soft glow by blending a blurred bright version of the image."""
+        if amount <= 0:
+            return img
+        # Blur the image (radius proportional to image size)
+        w, h = img.size
+        blur_radius = max(1, int(amount * 35 * (w / 1000.0)))
+        blurred = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        # Enhance brightness of the blurred image
+        bright_blurred = ImageEnhance.Brightness(blurred).enhance(1.25)
+        # Blend with original
+        return Image.blend(img, bright_blurred, alpha=amount * 0.45)
+
+    @staticmethod
+    def _add_sparkles(img, intensity=0.0):
+        """
+        Detect bright highlights in the image and draw 4-point star glints / sparkles on them.
+        Intensity is a value from 0.0 to 1.0 controlling sparkle size and quantity.
+        """
+        if intensity <= 0:
+            return img
+
+        import numpy as np
+        import random
+        from PIL import ImageDraw
+
+        # 1. Convert to grayscale to find bright pixels
+        gray = img.convert("L")
+        w, h = img.size
+
+        # Get pixel values as numpy array
+        arr = np.array(gray)
+
+        # Detect highlights (threshold gets lower/more permissive with higher intensity)
+        threshold = int(248 - intensity * 15)
+        y_indices, x_indices = np.where(arr >= threshold)
+
+        if len(x_indices) == 0:
+            return img
+
+        # Group coordinates or select a sparse subset to avoid overlap/crowding
+        candidates = list(zip(x_indices, y_indices))
+        random.shuffle(candidates)
+
+        # Max sparkles scaled by intensity
+        max_sparkles = int(10 + intensity * 45)
+
+        # Filter candidates to keep them spaced out (minimum distance of 30 image pixels)
+        selected = []
+        for pt in candidates:
+            if len(selected) >= max_sparkles:
+                break
+            too_close = False
+            for s_pt in selected:
+                if abs(pt[0] - s_pt[0]) < 30 and abs(pt[1] - s_pt[1]) < 30:
+                    too_close = True
+                    break
+            if not too_close:
+                selected.append(pt)
+
+        if not selected:
+            return img
+
+        # Draw sparkles on a copy of the image
+        result = img.copy()
+        draw = ImageDraw.Draw(result, "RGBA")
+
+        # Base size scaled by intensity and image width
+        base_size = int(15 + intensity * 25 * (w / 1000.0))
+
+        for cx, cy in selected:
+            # Determine sparkle color based on original pixel color
+            original_pixel = img.getpixel((cx, cy))
+            r = min(255, int(original_pixel[0] * 0.2 + 255 * 0.8))
+            g = min(255, int(original_pixel[1] * 0.2 + 255 * 0.8))
+            b = min(255, int(original_pixel[2] * 0.2 + 255 * 0.8))
+
+            # Sparkle size variation
+            glint_size = random.randint(int(base_size * 0.7), int(base_size * 1.3))
+            if glint_size <= 0:
+                continue
+
+            # 1. Draw central bright core
+            core_r = max(2, glint_size // 6)
+            draw.ellipse([cx - core_r, cy - core_r, cx + core_r, cy + core_r], fill=(255, 255, 255, 255))
+
+            # 2. Draw fading cross flares (horizontal and vertical lines)
+            for offset in range(1, glint_size):
+                alpha = int(255 * (1.0 - offset / float(glint_size)) ** 1.8)
+                if alpha <= 0:
+                    continue
+                thickness = max(1, (glint_size - offset) // 8)
+
+                # Horizontal lines
+                draw.line([(cx - offset, cy), (cx + offset, cy)], fill=(r, g, b, alpha), width=thickness)
+                # Vertical lines
+                draw.line([(cx, cy - offset), (cx, cy + offset)], fill=(r, g, b, alpha), width=thickness)
+
+                # Draw diagonal glints (slightly shorter and dimmer)
+                diag_offset = int(offset * 0.7)
+                if diag_offset > 0:
+                    diag_alpha = int(alpha * 0.45)
+                    # Diagonal 1
+                    draw.line([(cx - diag_offset, cy - diag_offset), (cx + diag_offset, cy + diag_offset)], fill=(r, g, b, diag_alpha), width=1)
+                    # Diagonal 2
+                    draw.line([(cx - diag_offset, cy + diag_offset), (cx + diag_offset, cy - diag_offset)], fill=(r, g, b, diag_alpha), width=1)
+
+        return result
+
+    def _apply_custom_adjustments(self, img):
+        """Apply manual slider adjustments (saturation, contrast, vignette, glow, sparkles) to the image."""
+        if not hasattr(self, "sat_slider"):
+            return img
+
+        # 1. Saturation
+        sat_val = self.sat_slider.get() / 100.0
+        if sat_val != 1.0:
+            img = ImageEnhance.Color(img).enhance(sat_val)
+
+        # 2. Contrast
+        contrast_val = self.contrast_slider.get() / 100.0
+        if contrast_val != 1.0:
+            img = ImageEnhance.Contrast(img).enhance(contrast_val)
+
+        # 3. Glow
+        glow_val = self.glow_slider.get() / 100.0
+        if glow_val > 0.0:
+            img = self._add_glow(img, amount=glow_val)
+
+        # 4. Sparkles / Glint
+        sparkle_val = self.sparkle_slider.get() / 100.0
+        if sparkle_val > 0.0:
+            img = self._add_sparkles(img, intensity=sparkle_val)
+
+        # 5. Vignette
+        vignette_val = self.vignette_slider.get() / 100.0
+        if vignette_val > 0.0:
+            img = self._add_vignette(img, strength=vignette_val * 0.85)
+
+        return img
 
     def _apply_color_grade(self, img):
-        """Return a new image with the current color grade applied (non-destructive)."""
+        """Return a new image with the current color grade and manual adjustments applied."""
+        # 1. Apply preset color filter
+        filtered_img = self._get_preset_filtered_image(img)
+
+        # 2. Apply custom adjustments
+        return self._apply_custom_adjustments(filtered_img)
+
+    def _get_preset_filtered_image(self, img):
+        """Return a new image with the selected preset filter applied."""
         if self.color_grade == "none":
             return img
 
