@@ -335,19 +335,17 @@ def create_brightness_glow(center_img, canvas_size=(1920, 1080), scale=1.6,
     # Boost saturation
     glow = ImageEnhance.Color(glow).enhance(saturation)
 
-    # Create an RGBA version with soft alpha edges (feathered)
-    # Use a radial gradient mask for smooth falloff
+    # Create a smooth radial feathering mask using Gaussian blur
+    # Start with a solid white circle in the middle (size of original image)
     mask = Image.new("L", (glow_w, glow_h), 0)
     mask_draw = ImageDraw.Draw(mask)
-
-    # Draw an elliptical gradient mask — bright center, transparent edges
-    cx, cy = glow_w // 2, glow_h // 2
-    max_radius = max(cx, cy)
-    for i in range(max_radius, 0, -1):
-        # Alpha falls off from 200 at center to 0 at edges
-        alpha = int(200 * (i / max_radius) ** 0.6)
-        bbox = [cx - i, cy - i, cx + i, cy + i]
-        mask_draw.ellipse(bbox, fill=alpha)
+    margin = (glow_w - w) // 2
+    
+    # Draw a solid circle centered, then blur it to create a perfect radial fade
+    mask_draw.ellipse([margin, margin, glow_w - margin, glow_h - margin], fill=200)
+    
+    # Blur the mask heavily to create a soft, natural radial falloff
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=60))
 
     glow_rgba = glow.convert("RGBA")
     glow_rgba.putalpha(mask)
@@ -364,32 +362,46 @@ def create_brightness_glow(center_img, canvas_size=(1920, 1080), scale=1.6,
 # ── Vignette overlay ─────────────────────────────────────────────────
 
 
-def create_vignette_overlay(width=1920, height=1080, strength=0.45):
+def create_vignette_overlay(width=1920, height=1080, strength=0.55):
     """
-    Create a subtle radial vignette overlay (dark edges, clear center).
+    Create a feathered optical-falloff vignette (darkest at corners, clear center).
+    Simulates real camera lens vignetting — the falloff is strongest at the four
+    corners and feathers naturally along the edges, leaving a large clear center.
     Returns an RGBA image to composite on top of the final canvas.
     """
-    # Create a radial gradient mask
-    cx, cy = width // 2, height // 2
-    max_dist = (cx ** 2 + cy ** 2) ** 0.5
+    cx, cy = width / 2.0, height / 2.0
 
-    # Build the vignette as a numpy array for speed
-    y_coords = np.arange(height)
-    x_coords = np.arange(width)
+    # Build coordinate grids
+    y_coords = np.arange(height, dtype=np.float64)
+    x_coords = np.arange(width, dtype=np.float64)
     yy, xx = np.meshgrid(y_coords, x_coords, indexing='ij')
 
-    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-    # Normalize distance to [0, 1]
-    normalized = dist / max_dist
+    # Normalized distance from center: 0 at center, 1 at corners
+    # Using squared-elliptical distance so corners get hit hardest
+    dx = (xx - cx) / cx
+    dy = (yy - cy) / cy
+    dist = np.sqrt(dx ** 2 + dy ** 2)  # max ≈ 1.414 at corners
 
-    # Apply a smooth falloff curve — stays clear in the center, darkens at edges
-    # Using power curve for natural-looking vignette
-    vignette = np.clip(normalized ** 1.8 * strength * 255, 0, 255).astype(np.uint8)
+    # Normalize so corners = 1.0
+    dist = dist / dist.max()
+
+    # Dead-zone: keep center ~60% completely clear, then feather out
+    threshold = 0.55
+    falloff = np.clip((dist - threshold) / (1.0 - threshold), 0.0, 1.0)
+
+    # High power curve for gentle, natural feathering (optical falloff feel)
+    falloff = falloff ** 3.0
+
+    # Scale to alpha values
+    vignette = np.clip(falloff * strength * 255, 0, 255).astype(np.uint8)
+
+    # Apply Gaussian blur to the mask itself for extra smooth feathering
+    mask = Image.fromarray(vignette, mode="L")
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=40))
 
     # Create black RGBA overlay with vignette as alpha
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     black_layer = Image.new("RGBA", (width, height), (0, 0, 0, 255))
-    mask = Image.fromarray(vignette, mode="L")
     overlay = Image.composite(black_layer, overlay, mask)
 
     return overlay

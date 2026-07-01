@@ -587,25 +587,40 @@ class CropperApp:
 
     @staticmethod
     def _add_vignette(img, strength=0.6):
-        """Apply a soft radial darkening around the edges."""
+        """Apply a feathered optical fall-off vignette (darkest at corners, clear center)."""
+        import numpy as np
         w, h = img.size
-        vignette = Image.new("L", (w, h), 0)
-        draw = ImageDraw.Draw(vignette)
-        # Draw concentric ellipses from bright (centre) to dark (edges)
-        steps = 40
-        for i in range(steps):
-            frac = i / float(steps)
-            brightness = int(255 * (1.0 - frac * frac * strength))
-            pad_x = int(w * 0.5 * frac)
-            pad_y = int(h * 0.5 * frac)
-            draw.ellipse(
-                [w // 2 - (w // 2 - pad_x), h // 2 - (h // 2 - pad_y),
-                 w // 2 + (w // 2 - pad_x), h // 2 + (h // 2 - pad_y)],
-                fill=brightness
-            )
-        # Use the vignette mask to darken original
+        
+        # Build coordinates
+        cx, cy = w / 2.0, h / 2.0
+        y_coords = np.arange(h, dtype=np.float64)
+        x_coords = np.arange(w, dtype=np.float64)
+        yy, xx = np.meshgrid(y_coords, x_coords, indexing='ij')
+
+        # Normalized distance from center (0 at center, 1 at corners)
+        dx = (xx - cx) / cx
+        dy = (yy - cy) / cy
+        dist = np.sqrt(dx ** 2 + dy ** 2)
+        max_d = dist.max()
+        if max_d > 0:
+            dist = dist / max_d
+
+        # Keep center ~55% completely untouched, then feather out
+        threshold = 0.55
+        falloff = np.clip((dist - threshold) / (1.0 - threshold), 0.0, 1.0)
+        falloff = falloff ** 3.0  # gentle falloff at corners
+
+        # Convert to mask: 0 (center/no change) to strength*255 (corners/darken)
+        vignette_alpha = np.clip(falloff * strength * 255, 0, 255).astype(np.uint8)
+        mask = Image.fromarray(vignette_alpha, mode="L")
+        
+        # Smooth the mask using a Gaussian blur proportional to image size
+        blur_radius = max(8, int(min(w, h) * 0.05))
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+        # Composite black color at corners using the mask
         dark = Image.new("RGB", (w, h), (0, 0, 0))
-        return Image.composite(img, dark, vignette)
+        return Image.composite(dark, img, mask)
 
     @staticmethod
     def _apply_curves(img, r_curve=None, g_curve=None, b_curve=None):
