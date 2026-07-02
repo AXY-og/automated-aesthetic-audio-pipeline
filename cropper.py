@@ -163,6 +163,7 @@ class CropperApp:
 
         tk.Button(self.bar, text="↺  Left",  command=self._rotate_left,  **s).pack(side=tk.LEFT, padx=4)
         tk.Button(self.bar, text="↻  Right", command=self._rotate_right, **s).pack(side=tk.LEFT, padx=4)
+        tk.Button(self.bar, text="🔄  Refresh", command=self._refresh_image, **s).pack(side=tk.LEFT, padx=4)
 
         tk.Frame(self.bar, width=12, bg="#16213e").pack(side=tk.LEFT)
 
@@ -1164,6 +1165,43 @@ class CropperApp:
         self._init_crop()
         self._fit_view()
         self._render()
+
+    def _refresh_image(self):
+        import glob
+        dir_path = os.path.dirname(self.image_path) or "input"
+        if not os.path.exists(dir_path):
+            dir_path = "input"
+
+        # Find all images in the input directory
+        img_files = []
+        for ext in ["jpg", "jpeg", "png", "JPG", "JPEG", "PNG"]:
+            img_files.extend(glob.glob(os.path.join(dir_path, f"*.{ext}")))
+
+        if not img_files and dir_path != "input":
+            # Search input/ as fallback
+            for ext in ["jpg", "jpeg", "png", "JPG", "JPEG", "PNG"]:
+                img_files.extend(glob.glob(os.path.join("input", f"*.{ext}")))
+
+        if not img_files:
+            print("  ⚠️ No image files found to refresh.")
+            return
+
+        # Sort by modification time (newest first)
+        img_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        newest_image = img_files[0]
+
+        print(f"  [Cropper] Refreshing image. Newest image found: {os.path.basename(newest_image)}")
+        try:
+            self.image_path = newest_image
+            self.original = Image.open(newest_image)
+            self.rotation = 0
+            self._update_working_image()
+            self._init_crop()
+            self._fit_view()
+            self._render()
+            print("  ✅ Image refreshed successfully!")
+        except Exception as e:
+            print(f"  ❌ Failed to reload image: {e}")
 
     # ── zoom ───────────────────────────────────────────────────────────
 
