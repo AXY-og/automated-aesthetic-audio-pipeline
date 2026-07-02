@@ -7,12 +7,14 @@ import subprocess
 import numpy as np
 import soundfile as sf
 from scipy.ndimage import gaussian_filter1d
+from scipy.signal import butter, sosfilt
 from PIL import Image, ImageEnhance
 
 def analyze_audio(audio_path, fps=30):
     """
     Load processed audio, compute RMS energy per frame, smooth it,
     and normalize it to [0.0, 1.0].
+    Also detects drum kicks using low-pass filtering and returns a decaying pulse envelope.
     """
     print(f"[Motion BG] Analyzing audio for envelope syncing: {os.path.basename(audio_path)}")
     try:
@@ -25,6 +27,7 @@ def analyze_audio(audio_path, fps=30):
         spf = int(samplerate / fps)
         num_frames = int(len(data) / spf)
 
+        # Compute full-range RMS for smooth motion
         rms = []
         for i in range(num_frames):
             start = i * spf
@@ -36,11 +39,10 @@ def analyze_audio(audio_path, fps=30):
                 rms.append(np.sqrt(np.mean(frame_data ** 2)))
 
         rms = np.array(rms)
-        
         # Smooth envelope using a Gaussian filter for fluid motions
         rms = gaussian_filter1d(rms, sigma=6.0)
 
-        # Normalize to [0.0, 1.0]
+        # Normalize full-range RMS to [0.0, 1.0]
         r_max = rms.max()
         r_min = rms.min()
         if r_max > r_min:
@@ -48,7 +50,69 @@ def analyze_audio(audio_path, fps=30):
         else:
             rms = np.zeros_like(rms)
 
-        return rms
+        # --- Kick drum detection (lowpass filter < 80Hz + first difference onset detection) ---
+        try:
+            # Lowpass filter to isolate fundamental kick frequencies
+            nyquist = 0.5 * samplerate
+            cutoff = 80.0
+            normal_cutoff = cutoff / nyquist
+            sos = butter(4, normal_cutoff, btype='low', output='sos')
+            low_filtered = sosfilt(sos, data)
+            
+            rms_low = []
+            for i in range(num_frames):
+                start = i * spf
+                end = start + spf
+                frame_data = low_filtered[start:end]
+                if len(frame_data) == 0:
+                    rms_low.append(0.0)
+                else:
+                    rms_low.append(np.sqrt(np.mean(frame_data ** 2)))
+            
+            rms_low = np.array(rms_low)
+            
+            # Smooth slightly to remove noise but keep attack transients sharp
+            rms_low = gaussian_filter1d(rms_low, sigma=1.0)
+            
+            # Compute positive difference (onset strength) to detect attacks (onset transient)
+            # This ignores sustained sub-bass notes or vocal hums
+            rms_diff = np.diff(rms_low, prepend=0.0)
+            rms_diff = np.clip(rms_diff, 0.0, None)  # only keep positive rises
+            
+            # Normalize the difference/onset envelope (if max rise exceeds noise floor)
+            rd_max = rms_diff.max()
+            if rd_max > 0.005:
+                rms_diff = rms_diff / rd_max
+            else:
+                rms_diff = np.zeros_like(rms_diff)
+                
+            # Detect local peaks (kicks) on the difference envelope
+            kicks = np.zeros(num_frames)
+            window = 4  # minimum distance between kicks (at 30 fps, 4 frames is ~133ms)
+            for i in range(window, num_frames - window):
+                val = rms_diff[i]
+                # Check if local maximum in the window
+                is_local_max = all(val >= rms_diff[i + j] for j in range(-window, window + 1))
+                # Threshold for kick peak strength on the difference envelope
+                if is_local_max and val > 0.30:
+                    kicks[i] = 1.0
+                    
+            # Generate decaying pulse envelope
+            kick_pulse = np.zeros(num_frames)
+            current_val = 0.0
+            decay = 0.82  # decay factor per frame (~200ms decay time)
+            for i in range(num_frames):
+                if kicks[i] > 0:
+                    current_val = 1.0
+                else:
+                    current_val *= decay
+                kick_pulse[i] = current_val
+                
+        except Exception as e_kick:
+            print(f"  ⚠️ Kick detection failed: {e_kick}. Falling back to standard envelope for pulses.")
+            kick_pulse = rms.copy()
+
+        return rms, kick_pulse
     except Exception as e:
         print(f"  ⚠️ Audio envelope extraction failed: {e}. Using constant zero energy.")
         return None
@@ -79,12 +143,18 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
     overlay = Image.open(overlay_image_path).convert("RGBA")
     
     # 2. Extract audio RMS envelope
-    energy = analyze_audio(audio_path, fps=fps)
-    if energy is None:
+    audio_analysis = analyze_audio(audio_path, fps=fps)
+    if audio_analysis is None:
         # Fallback to zeros (no sync, only smooth sinusoidal drift)
-        energy = np.zeros(int(300 * fps)) # 5 minutes default
+        smooth_env = np.zeros(int(300 * fps)) # 5 minutes default
+        kick_pulse = np.zeros(int(300 * fps))
+    else:
+        smooth_env, kick_pulse = audio_analysis
         
-    total_frames = len(energy)
+    total_frames = len(smooth_env)
+    if "_test.mp4" in output_path:
+        total_frames = min(total_frames, 15 * fps)
+        print(f"  🧪 Capping render to 15 seconds ({total_frames} frames) for test snippet.")
     duration = total_frames / fps
     print(f"  ↳ Total frames: {total_frames} ({duration:.1f}s at {fps} fps)")
 
@@ -135,19 +205,20 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
     try:
         for n in range(total_frames):
             t = n / float(fps)
-            e = energy[n]
+            e = smooth_env[n]
+            pulse = kick_pulse[n]
             
             # --- Dynamic motion transforms ---
             # 1. Slow organic panning drift
             drift_x = math.sin(t * 0.20) * 80.0
             drift_y = math.cos(t * 0.15) * 50.0
             
-            # 2. Breathing zoom modulated by slow sinwave + beat energy
-            zoom = 1.05 + math.sin(t * 0.30) * 0.02 + e * 0.03
+            # 2. Breathing zoom modulated by slow sinwave + beat energy (now with kick pulse bump!)
+            zoom = 1.05 + math.sin(t * 0.30) * 0.02 + pulse * 0.04
             
-            # 3. Dynamic brightness & saturation pulses
-            brightness = 0.55 + e * 0.12
-            saturation = 1.30 + e * 0.20
+            # 3. Dynamic brightness & saturation pulses synced to drum kick
+            brightness = 0.55 + pulse * 0.15
+            saturation = 1.30 + pulse * 0.20
             
             # Determine crop box dimensions
             crop_w = 1920.0 / zoom

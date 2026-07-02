@@ -531,7 +531,7 @@ def _avg_color_of_region(canvas, x, y, w, h):
 # ── Main generation ──────────────────────────────────────────────────
 
 
-def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
+def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=None, artist=None):
     """
     Main entry point: Generates a 1920x1080 thumbnail image.
     Uses a blurred version of the Pinterest image as the background.
@@ -541,7 +541,27 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
     print("=" * 55)
 
     # Step 0: Metadata extraction
-    title, artist, thumb_url = extract_metadata(youtube_url)
+    if not title or not artist:
+        extracted_title, extracted_artist, thumb_url = extract_metadata(youtube_url)
+        title = title or extracted_title
+        artist = artist or extracted_artist
+    else:
+        # If title and artist are passed in, get the thumbnail URL fallback if available
+        thumb_url = None
+        if youtube_url:
+            try:
+                cmd = ["yt-dlp", "--no-playlist", "--dump-json", youtube_url]
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=20)
+                info = json.loads(proc.stdout)
+                thumb_url = info.get("thumbnail", "")
+                thumbnails = info.get("thumbnails", [])
+                if thumbnails:
+                    valid_thumbs = [t for t in thumbnails if t.get("width") and t.get("height")]
+                    if valid_thumbs:
+                        best_thumb = max(valid_thumbs, key=lambda t: t.get("width", 0))
+                        thumb_url = best_thumb.get("url", thumb_url)
+            except Exception:
+                pass
 
     # Download YouTube thumbnail as fallback
     temp_art = download_thumbnail(thumb_url)

@@ -23,6 +23,22 @@ from uploader import authenticate, upload_video, sanitize_tags
 METADATA_FILE = "upload_metadata.json"
 
 
+def play_notification_sound():
+    """Play a short system alert sound on macOS, falling back to a terminal bell."""
+    try:
+        import subprocess
+        if sys.platform == "darwin":
+            sound_path = "/System/Library/Sounds/Glass.aiff"
+            if os.path.exists(sound_path):
+                subprocess.Popen(["afplay", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.Popen(["afplay", "/System/Library/Sounds/Ping.aiff"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            print("\a", end="", flush=True)
+    except Exception:
+        print("\a", end="", flush=True)
+
+
 # ── Phase 1: Video Generation ─────────────────────────────────────────
 
 def phase_video_generation():
@@ -41,6 +57,7 @@ def phase_video_generation():
         sys.exit(1)
 
     print(f"\n✅ Video generated successfully: {result['video_path']}")
+    play_notification_sound()
     proceed = input("\nDo you want to proceed with uploading to YouTube? (y/n): ").strip().lower()
 
     if proceed != "y":
@@ -311,6 +328,22 @@ def phase_upload(video_path, metadata):
         print(f"  ✅ Upload complete!")
         print(f"  🔗 {url}")
         print("=" * 55 + "\n")
+
+        # Clean up input and output directories
+        print("🧹 Cleaning up input and output directories...")
+        import shutil
+        for folder in ["input", "output"]:
+            if os.path.exists(folder):
+                for filename in os.listdir(folder):
+                    file_path = os.path.join(folder, filename)
+                    try:
+                        if os.path.isfile(file_path) or os.path.islink(file_path):
+                            os.unlink(file_path)
+                        elif os.path.isdir(file_path):
+                            shutil.rmtree(file_path)
+                    except Exception as e:
+                        print(f"  ⚠️ Failed to delete {file_path}: {e}")
+        print("  ✅ Cleanup complete.\n")
     else:
         print("\n  ❌ Upload failed. Please check the error above and try again.")
         sys.exit(1)
@@ -327,29 +360,33 @@ def main():
     yt_meta = result.get("yt_meta", {})
 
     # ── Parse artist / song from scraped YouTube title ──
-    artist_name = yt_meta.get("artist", "")
-    song_name = ""
-    yt_title = yt_meta.get("yt_title", "")
+    if "confirmed_artist" in yt_meta and "confirmed_song" in yt_meta:
+        artist_name = yt_meta["confirmed_artist"]
+        song_name = yt_meta["confirmed_song"]
+    else:
+        artist_name = yt_meta.get("artist", "")
+        song_name = ""
+        yt_title = yt_meta.get("yt_title", "")
 
-    if yt_title:
-        # Same parsing logic as thumbnail.py — split "Artist - Title"
-        if not artist_name and " - " in yt_title:
-            parts = yt_title.split(" - ", 1)
-            artist_name = parts[0].strip()
-            song_name = parts[1].strip()
-        elif " - " in yt_title:
-            song_name = yt_title.split(" - ", 1)[1].strip()
-        else:
-            song_name = yt_title
+        if yt_title:
+            # Same parsing logic as thumbnail.py — split "Artist - Title"
+            if not artist_name and " - " in yt_title:
+                parts = yt_title.split(" - ", 1)
+                artist_name = parts[0].strip()
+                song_name = parts[1].strip()
+            elif " - " in yt_title:
+                song_name = yt_title.split(" - ", 1)[1].strip()
+            else:
+                song_name = yt_title
 
-        # Clean common video suffixes
-        clean_regex = r'\s*[\(\[][^\]\)]*(official|video|lyric|lyrics|audio|slowed|reverb|8d|music|clip|prod|remix|hd|4k)[^\]\)]*[\)\]]'
-        song_name = re.sub(clean_regex, '', song_name, flags=re.IGNORECASE).strip()
-        artist_name = re.sub(clean_regex, '', artist_name, flags=re.IGNORECASE).strip()
+            # Clean common video suffixes
+            clean_regex = r'\s*[\(\[][^\]\)]*(official|video|lyric|lyrics|audio|slowed|reverb|8d|music|clip|prod|remix|hd|4k)[^\]\)]*[\)\]]'
+            song_name = re.sub(clean_regex, '', song_name, flags=re.IGNORECASE).strip()
+            artist_name = re.sub(clean_regex, '', artist_name, flags=re.IGNORECASE).strip()
 
-        # Strip featured artists — keep only the primary artist
-        from thumbnail import strip_features
-        artist_name = strip_features(artist_name)
+            # Strip featured artists — keep only the primary artist
+            from thumbnail import strip_features
+            artist_name = strip_features(artist_name)
 
     channel_url = yt_meta.get("channel_url", "")
 

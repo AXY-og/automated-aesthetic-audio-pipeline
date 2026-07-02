@@ -2,6 +2,7 @@ import subprocess
 import glob
 import os
 import shutil
+import re
 import numpy as np
 import pyrubberband as pyrb
 import yt_dlp
@@ -371,6 +372,56 @@ def main(skip_effects=False):
             return None
         print(f"  ✅ Downloaded: {os.path.basename(audio)}")
         
+        # Parse artist and song name from yt_meta
+        artist_name = yt_meta.get("artist", "")
+        song_name = ""
+        yt_title = yt_meta.get("yt_title", "")
+
+        if yt_title:
+            # Same parsing logic as thumbnail.py — split "Artist - Title"
+            if not artist_name and " - " in yt_title:
+                parts = yt_title.split(" - ", 1)
+                artist_name = parts[0].strip()
+                song_name = parts[1].strip()
+            elif " - " in yt_title:
+                song_name = yt_title.split(" - ", 1)[1].strip()
+            else:
+                song_name = yt_title
+
+            # Clean common video suffixes
+            clean_regex = r'\s*[\(\[][^\]\)]*(official|video|lyric|lyrics|audio|slowed|reverb|8d|music|clip|prod|remix|hd|4k)[^\]\)]*[\)\]]'
+            song_name = re.sub(clean_regex, '', song_name, flags=re.IGNORECASE).strip()
+            artist_name = re.sub(clean_regex, '', artist_name, flags=re.IGNORECASE).strip()
+
+            from thumbnail import strip_features
+            artist_name = strip_features(artist_name)
+
+        if artist_name and song_name:
+            print(f"\n  Detected details from video:")
+            print(f"    Artist: {artist_name}")
+            print(f"    Song:   {song_name}")
+            use_detected = input("\n  Use these details? (y/n) [default y]: ").strip().lower()
+            if use_detected == "n":
+                print()
+                artist_name = ""
+                while not artist_name:
+                    artist_name = input("  Enter artist name: ").strip()
+                song_name = ""
+                while not song_name:
+                    song_name = input("  Enter song/track name: ").strip()
+        else:
+            print("\n  ⚠️ Could not detect artist/song metadata from video.")
+            artist_name = ""
+            while not artist_name:
+                artist_name = input("  Enter artist name: ").strip()
+            song_name = ""
+            while not song_name:
+                song_name = input("  Enter song/track name: ").strip()
+
+        # Update yt_meta with confirmed details
+        yt_meta["confirmed_artist"] = artist_name
+        yt_meta["confirmed_song"] = song_name
+
         # Auto-generate thumbnail immediately after download
         try:
             import thumbnail
@@ -380,7 +431,13 @@ def main(skip_effects=False):
             local_image = find_file(INPUT_DIR, ["jpg", "jpeg", "png"])
             
             # Generate the thumbnail (uses YouTube thumbnail as fallback if no local image is present)
-            thumbnail.generate_thumbnail(source_url, local_image, thumb_path)
+            thumbnail.generate_thumbnail(
+                source_url, 
+                local_image, 
+                thumb_path,
+                title=yt_meta.get("confirmed_song"),
+                artist=yt_meta.get("confirmed_artist")
+            )
             print(f"  ✅ Automatically generated styled thumbnail: {os.path.basename(thumb_path)}")
         except Exception as e:
             print(f"  ⚠️ Automatic thumbnail generation failed: {e}")
@@ -389,6 +446,18 @@ def main(skip_effects=False):
         if not audio:
             print("No audio file found in input/")
             return None
+        print(f"\n  No YouTube URL provided. Local file detected: {os.path.basename(audio)}")
+        artist_name = ""
+        while not artist_name:
+            artist_name = input("  Enter artist name: ").strip()
+        song_name = ""
+        while not song_name:
+            song_name = input("  Enter song/track name: ").strip()
+            
+        yt_meta = {
+            "confirmed_artist": artist_name,
+            "confirmed_song": song_name
+        }
 
     used_auto_thumbnail = False
     image = find_file(INPUT_DIR, ["jpg", "jpeg", "png"])
@@ -483,7 +552,15 @@ def main(skip_effects=False):
 
     # Combine — pass any pre-generated thumbnail to avoid double generation
     name = os.path.splitext(os.path.basename(audio))[0]
-    output_path = os.path.join(OUTPUT_DIR, f"{name}.mp4")
+    
+    # Prompt for test render mode
+    test_mode = input("\nRender a short test snippet (15s) instead of the full video? (y/n) [default n]: ").strip().lower()
+    if test_mode == "y":
+        output_path = os.path.join(OUTPUT_DIR, f"{name}_test.mp4")
+        print(f"  🧪 Test mode enabled! Output: {os.path.basename(output_path)}")
+    else:
+        output_path = os.path.join(OUTPUT_DIR, f"{name}.mp4")
+        
     existing_thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
 
     print("Combining audio and image...")
