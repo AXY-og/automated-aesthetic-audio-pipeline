@@ -219,6 +219,20 @@ def combine(image_path, audio_path, output_path, profile, youtube_url=None, exis
     # Use the pre-generated thumbnail if available (avoids double generation)
     thumb_path = os.path.splitext(output_path)[0] + ".png"
 
+    # Prompt for rhythmic background motion
+    use_motion = input("  Use rhythmic background motion? (y/n) [default y]: ").strip().lower()
+    if use_motion != "n":
+        config_path = (existing_thumb + ".config.json") if existing_thumb else (thumb_path + ".config.json")
+        if os.path.exists(config_path):
+            try:
+                import motion_bg
+                motion_bg.render_motion_video(audio_path, output_path, profile, config_path)
+                return
+            except Exception as e:
+                print(f"  ⚠️ Motion background rendering failed ({e}). Falling back to static video...")
+        else:
+            print("  ⚠️ Thumbnail configuration file missing. Falling back to static video...")
+
     if existing_thumb and os.path.exists(existing_thumb):
         # Thumbnail was already generated earlier — just use it
         video_bg = existing_thumb

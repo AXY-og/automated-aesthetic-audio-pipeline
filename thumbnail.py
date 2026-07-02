@@ -668,30 +668,58 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path):
         title_start, title_end = get_pop_gradient(top_bg)
         artist_start, artist_end = get_pop_gradient(bottom_bg)
 
-    # ── Step 6: Text layout ──
-    print("[Step 6] Drawing text layout...")
-    # Centre text vertically within the margin between image edge and canvas edge.
-    # Top margin: Y 0–210  → centre = 105   (anchor "mm" = vertical+horizontal centre)
-    # Bottom margin: Y 870–1080 → centre = 975
-    draw_gradient_text(canvas_rgb, title, title_font, 960, 105, title_start, title_end, anchor="mm", stroke_width=1)
-    draw_gradient_text(canvas_rgb, artist, artist_font, 960, 975, artist_start, artist_end, anchor="mm", stroke_width=1)
+    # ── Step 6: Assemble Overlay Canvas ──
+    print("[Step 6] Assembling transparent overlay canvas...")
+    overlay = Image.new("RGBA", (1920, 1080), (0, 0, 0, 0))
 
-    # ── Step 6b: Vignette (optional, applied last) ──
+    # Add brightness glow behind center image
+    if use_glow:
+        glow_layer = create_brightness_glow(central_img, canvas_size=(1920, 1080))
+        overlay = Image.alpha_composite(overlay, glow_layer)
+
+    # Add drop shadow behind center image
+    glow_img = create_glow_image(size=800, inner_size=660, spread=16, blur=30, max_alpha=0.5)
+    glow_x = (1920 - 800) // 2
+    glow_y = (1080 - 800) // 2
+    overlay.paste(glow_img, (glow_x, glow_y), glow_img)
+
+    # Paste center cover image
+    central_rgba = central_img.convert("RGBA")
+    central_x = (1920 - 660) // 2
+    central_y = (1080 - 660) // 2
+    overlay.paste(central_rgba, (central_x, central_y), central_rgba)
+
+    # Draw gradient texts onto overlay
+    draw_gradient_text(overlay, title, title_font, 960, 105, title_start, title_end, anchor="mm", stroke_width=1)
+    draw_gradient_text(overlay, artist, artist_font, 960, 975, artist_start, artist_end, anchor="mm", stroke_width=1)
+
+    # Add optional vignette last
     if use_vignette:
-        print("[Step 6b] Applying vignette overlay...")
-        canvas_rgba = canvas_rgb.convert("RGBA")
         vignette = create_vignette_overlay(1920, 1080, strength=0.45)
-        canvas_rgba = Image.alpha_composite(canvas_rgba, vignette)
-        canvas_rgb = canvas_rgba.convert("RGB")
-        print("  ↳ Vignette applied")
+        overlay = Image.alpha_composite(overlay, vignette)
+
+    # Composite the overlay onto the background to get final output image
+    final_rgba = Image.alpha_composite(canvas, overlay)
+    canvas_rgb = final_rgba.convert("RGB")
 
     # ── Step 7: Save output ──
-    print(f"\n[Step 7] Saving final thumbnail to {output_path}...")
+    print(f"\n[Step 7] Saving final thumbnail and overlay components...")
     try:
         # Ensure parent directories exist
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         canvas_rgb.save(output_path, "PNG")
-        print("  ✅ Thumbnail generation complete!")
+        
+        # Save overlay components for video background motion module
+        overlay_path = output_path + ".overlay.png"
+        config_path = output_path + ".config.json"
+        overlay.save(overlay_path, "PNG")
+        with open(config_path, "w") as f:
+            json.dump({
+                "center_image": os.path.abspath(chosen_center_image),
+                "overlay_image": os.path.abspath(overlay_path)
+            }, f, indent=2)
+            
+        print("  ✅ Thumbnail and overlay generation complete!")
     finally:
         # Clean up temp thumbnail if downloaded
         if temp_art and temp_art != thumb_url and os.path.exists(temp_art):
