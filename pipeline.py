@@ -104,6 +104,13 @@ def phase_metadata(source_url, artist_name="", song_name="", effects=None,
     original_link = original_link or source_url or ""
 
     if not song_name or not artist_name:
+        print()
+        if not artist_name:
+            artist_name = input("  Enter Artist name: ").strip()
+        if not song_name:
+            song_name = input("  Enter Song name:   ").strip()
+
+    if not song_name or not artist_name:
         print("  ⚠️  Song name and artist name are required.")
         sys.exit(1)
 
@@ -339,8 +346,10 @@ def phase_upload(video_path, metadata):
                     try:
                         if os.path.isfile(file_path) or os.path.islink(file_path):
                             os.unlink(file_path)
+                            print(f"  Deleted file: {filename}")
                         elif os.path.isdir(file_path):
                             shutil.rmtree(file_path)
+                            print(f"  Deleted folder: {filename}")
                     except Exception as e:
                         print(f"  ⚠️ Failed to delete {file_path}: {e}")
         print("  ✅ Cleanup complete.\n")

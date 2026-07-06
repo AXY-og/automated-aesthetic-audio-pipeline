@@ -1,0 +1,95 @@
+# YouTube API Key or OAuth JSON Path.
+# If oauth_token_path is set, it will attempt to use the existing YouTube OAuth client.
+youtube_api_key: ""
+oauth_token_path: "../token.json"
+client_secrets_path: "../client_secrets.json"
+
+seed_keywords:
+  - "edit"
+  - "amv edit"
+  - "gym edit"
+  - "car edit"
+  - "sigma edit"
+  - "anime edit"
+  - "sad edit"
+  - "phonk edit"
+  - "motivation edit"
+  - "slowed reverb"
+
+seed_channels:
+  - "UCtjO8cix9XxwOcAv6nww-TQ" # Ken Carson channel example
+
+regions:
+  - "IN"
+  - "US"
+
+max_short_duration_seconds: 60      # Use 60 for standard shorts, or 180 for longer format Shorts
+tracking_window_days: 10
+cycle_hours: 6
+
+scoring_weights:
+  velocity: 0.4
+  breadth_trend: 0.35
+  recency: 0.15
+  saturation_penalty: 0.10
+
+saturation_threshold_videos: 45
+
+# --- New settings in Addendum ---
+international_only: true
+
+excluded_scripts: ["devanagari", "gurmukhi", "tamil", "telugu", "bengali"]
+
+excluded_language_codes: ["hi", "pa", "ta", "te", "bn", "mr", "gu", "kn", "ml", "ur"]
+
+genre_denylist_phrases:
+  - "whatsapp status"
+  - "lyrics status"
+  - "aesthetic status"
+  - "shayari"
+  - "attitude status"
+  - "trending status"
+
+generic_word_blocklist:
+  - "sigma"
+  - "aura"
+  - "edit"
+  - "gym"
+  - "motivation"
+  - "fyp"
+  - "foryou"
+  - "for you"
+  - "viral"
+  - "trending"
+  - "status"
+  - "aesthetic"
+  - "calisthenics"
+  - "reels"
+  - "shorts"
+  - "short"
+  - "itachi"
+  - "uchiha"
+  - "naruto"
+  - "shippuden"
+  - "amv"
+  - "coldest"
+  - "mrbeast"
+
+romanized_keyword_denylist: []
+min_romanized_matches_for_exclusion: 2
+
+song_match_similarity_threshold: 0.85
+title_duplicate_similarity_threshold: 0.90
+
+# --- Settings in Addendum 3 ---
+qualifying_view_floor: 1000000
+lookback_window_days: 7
+discovery_order: viewCount
+
+label_only_words:
+  - "song name"
+  - "song"
+  - "audio"
+  - "music"
+  - "track"
+  - "sound"

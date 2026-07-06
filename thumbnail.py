@@ -14,7 +14,7 @@ import urllib.request
 import urllib.parse
 import colorsys
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance, ImageChops
 
 
 def strip_features(name):
@@ -249,14 +249,15 @@ def download_thumbnail(url_or_path):
 def create_blurred_bg(image_path, width=1920, height=1080, blur_radius=70, darken=0.55):
     """
     Create an aesthetic blurred background from the source image.
-    Scales the image to cover 1920x1080, applies heavy Gaussian blur,
-    and darkens slightly for text readability.
+    Scales the image to cover target canvas (16:9), applies heavy Gaussian blur,
+    increases brightness and saturation, generates a bloom pass for glowing highlights,
+    and applies a radial vignette that fades to black toward the edges.
     """
     print("[Step 1] Creating blurred image background...")
     img = Image.open(image_path).convert("RGB")
     img_w, img_h = img.size
 
-    # Scale to cover the target dimensions (crop-to-fill)
+    # 1. Scale to cover the target dimensions (crop-to-fill)
     target_ratio = width / height
     img_ratio = img_w / img_h
 
@@ -271,24 +272,69 @@ def create_blurred_bg(image_path, width=1920, height=1080, blur_radius=70, darke
 
     img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-    # Center crop to exactly 1920x1080
+    # Center crop
     left = (new_w - width) // 2
     top = (new_h - height) // 2
     img = img.crop((left, top, left + width, top + height))
 
-    # Apply heavy Gaussian blur
+    # 2. Apply a strong Gaussian blur
     img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
 
-    # Darken for text contrast
-    if darken < 1.0:
-        enhancer = ImageEnhance.Brightness(img)
-        img = enhancer.enhance(darken)
+    # 3. Increase brightness and saturation
+    # Apply user-specified darkening factor or default boost if darken is 1.0 (e.g. from motion_bg.py)
+    brightness_factor = 1.25 if darken >= 1.0 else (darken * 2.0)
+    img = ImageEnhance.Brightness(img).enhance(brightness_factor)
+    img = ImageEnhance.Color(img).enhance(1.4)
 
-    # Slightly boost saturation so the blurred colors stay rich
-    sat_enhancer = ImageEnhance.Color(img)
-    img = sat_enhancer.enhance(1.3)
+    # 4. Generate a bloom pass
+    # Convert a copy to grayscale for luminance mask
+    luminance = img.convert("L")
+    # Threshold for bright pixels (threshold of 180 out of 255)
+    threshold = 180
+    bright_mask = luminance.point(lambda p: 255 if p > threshold else 0)
+    
+    # Create an image containing only the bright pixels
+    bright_pixels = Image.new("RGB", img.size, (0, 0, 0))
+    bright_pixels.paste(img, mask=bright_mask)
+    
+    # Blur the bright pixels with a larger radius (blur_radius * 1.5)
+    bloom_radius = int(blur_radius * 1.5)
+    bright_blurred = bright_pixels.filter(ImageFilter.GaussianBlur(radius=bloom_radius))
+    
+    # Blend back over the background using 'screen' blend mode
+    img = ImageChops.screen(img, bright_blurred)
 
-    print(f"  ↳ Blurred background created ({width}x{height}, blur={blur_radius})")
+    # 5. Apply radial vignette fading to black at edges
+    cx, cy = width / 2.0, height / 2.0
+    y_coords = np.arange(height, dtype=np.float64)
+    x_coords = np.arange(width, dtype=np.float64)
+    yy, xx = np.meshgrid(y_coords, x_coords, indexing='ij')
+
+    # Distance from center
+    dx = (xx - cx) / cx
+    dy = (yy - cy) / cy
+    dist = np.sqrt(dx ** 2 + dy ** 2)
+    dist = dist / dist.max()  # normalize to 1.0 at corner
+
+    # Vignette curve: clear center, fade to black towards edges
+    threshold_v = 0.40
+    v_strength = 0.80  # strength of vignette (0.0 to 1.0)
+    
+    falloff = np.clip((dist - threshold_v) / (1.0 - threshold_v), 0.0, 1.0)
+    falloff = falloff ** 2.0
+    
+    # Map to mask alpha
+    vignette_alpha = np.clip(falloff * v_strength * 255, 0, 255).astype(np.uint8)
+    
+    # Blur the vignette mask for smooth edges
+    vignette_mask = Image.fromarray(vignette_alpha, mode="L")
+    vignette_mask = vignette_mask.filter(ImageFilter.GaussianBlur(radius=30))
+    
+    # Blend black color using the vignette mask
+    black_img = Image.new("RGB", img.size, (0, 0, 0))
+    img = Image.composite(black_img, img, vignette_mask)
+
+    print(f"  ↳ Blurred background with bloom and vignette created ({width}x{height}, blur={blur_radius})")
     return img
 
 
@@ -644,12 +690,18 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
     print("Select typography font:")
     print("  1) Moontime (Elegant Cursive) [Default]")
     print("  2) UnifrakturCook (Vintage Blackletter)")
-    font_choice = input("Enter 1 or 2 [default 1]: ").strip()
+    print("  3) Rock Salt (Handwritten Brush)")
+    font_choice = input("Enter 1, 2, or 3 [default 1]: ").strip()
 
     if font_choice == "2":
         font_path = "assets/fonts/UnifrakturCook.ttf"
         if not os.path.exists(font_path):
             print("  ⚠️ UnifrakturCook font file missing. Using Moontime.")
+            font_path = "assets/fonts/Moontime.ttf"
+    elif font_choice == "3":
+        font_path = "assets/fonts/RockSalt.ttf"
+        if not os.path.exists(font_path):
+            print("  ⚠️ RockSalt font file missing. Using Moontime.")
             font_path = "assets/fonts/Moontime.ttf"
     else:
         font_path = "assets/fonts/Moontime.ttf"

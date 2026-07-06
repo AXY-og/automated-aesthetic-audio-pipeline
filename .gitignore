@@ -19,3 +19,9 @@ Thumbs.db
 
 # Upload state
 upload_metadata.json
+
+# Trend finder DB and reports
+trend_finder/*.db
+trend_finder/reports/
+trend_finder/__pycache__/
+failed.txt

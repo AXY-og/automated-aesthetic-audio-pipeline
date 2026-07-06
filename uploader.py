@@ -7,6 +7,8 @@ using the YouTube Data API v3.
 import os
 import sys
 import json
+import time
+import random
 import httplib2
 from datetime import date
 
@@ -16,32 +18,125 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
+import tempfile
+from PIL import Image
+
+def get_thumbnail_path(video_path):
+    """
+    Locates the generated styled thumbnail (PNG or JPG) based on the video path.
+    Also handles suffixes like '_subbed' or '_test' by checking clean variations.
+    """
+    if not video_path:
+        return None
+    base, _ = os.path.splitext(video_path)
+    paths = [base + ".png", base + ".jpg"]
+    # Handle suffixes
+    for suffix in ["_subbed", "_test"]:
+        if base.endswith(suffix):
+            clean_base = base[:-len(suffix)]
+            paths.extend([clean_base + ".png", clean_base + ".jpg"])
+    # Check if any path exists
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
+
+def prepare_4k_thumbnail(thumbnail_path):
+    """
+    Upscales a thumbnail image to 4K (3840x2160) and saves it as a JPEG
+    compressed to be under 2MB so it fits YouTube's upload constraints.
+    """
+    if not thumbnail_path or not os.path.exists(thumbnail_path):
+        return None
+    try:
+        img = Image.open(thumbnail_path)
+        # Upscale to 4K
+        img_4k = img.resize((3840, 2160), Image.Resampling.LANCZOS)
+        
+        # Save to a temporary JPEG file
+        temp_jpeg = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+        temp_path = temp_jpeg.name
+        temp_jpeg.close()
+        
+        # Save as JPEG with optimized quality to stay under 2MB
+        img_4k.convert("RGB").save(temp_path, "JPEG", quality=90, optimize=True)
+        
+        # Verify file size is under 2MB (2 * 1024 * 1024 bytes)
+        file_size = os.path.getsize(temp_path)
+        if file_size > 2 * 1024 * 1024:
+            print(f"  ⚠️ 4K thumbnail size is {file_size / (1024*1024):.2f} MB (exceeds 2MB). Re-compressing with quality=80...")
+            img_4k.convert("RGB").save(temp_path, "JPEG", quality=80, optimize=True)
+            file_size = os.path.getsize(temp_path)
+            
+        print(f"  ✅ Prepared 4K thumbnail: {file_size / (1024*1024):.2f} MB")
+        return temp_path
+    except Exception as e:
+        print(f"  ⚠️ Failed to prepare 4K thumbnail: {e}")
+        return None
+
+def upload_thumbnail(youtube, video_id, thumbnail_path):
+    """Uploads a custom thumbnail to YouTube for the specified video."""
+    print(f"  Uploading custom thumbnail: {os.path.basename(thumbnail_path)}...")
+    try:
+        media = MediaFileUpload(
+            thumbnail_path,
+            mimetype="image/jpeg"
+        )
+        youtube.thumbnails().set(
+            videoId=video_id,
+            media_body=media
+        ).execute()
+        print("  ✅ Custom thumbnail uploaded successfully!")
+        return True
+    except Exception as e:
+        print(f"  ⚠️ Custom thumbnail upload failed: {e}")
+        return False
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube",          # playlists
     "https://www.googleapis.com/auth/youtube.force-ssl", # playlist items
+    "https://www.googleapis.com/auth/drive.file",        # Google Drive upload
 ]
 CLIENT_SECRETS_FILE = "client_secrets.json"
 TOKEN_FILE = "token.json"
 
 # Retry config for resumable uploads
-MAX_RETRIES = 5
+MAX_RETRIES = 10
 RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
+RETRIABLE_EXCEPTIONS = (
+    TimeoutError,
+    ConnectionError,
+    ConnectionResetError,
+    BrokenPipeError,
+    OSError,
+    httplib2.HttpLib2Error,
+)
 
 
-def authenticate():
+def get_credentials():
     """
-    Authenticate with YouTube via OAuth 2.0.
-    - Loads saved token from token.json if available.
-    - Refreshes expired tokens automatically.
-    - Opens browser for consent only on first run or when refresh token is invalid/revoked.
-    Returns an authorized YouTube API service object.
+    Get authorized user credentials from file, refresh them if expired,
+    or run OAuth flow if not present or missing scopes.
     """
     creds = None
 
     if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+            
+            # Check if all requested scopes are present in the credentials
+            has_all_scopes = True
+            for scope in SCOPES:
+                if not creds.scopes or scope not in creds.scopes:
+                    has_all_scopes = False
+                    break
+            if not has_all_scopes:
+                print("Existing token is missing required scopes. Triggering re-authorization...")
+                creds = None
+        except Exception as e:
+            print(f"Failed to load credentials from token file: {e}")
+            creds = None
 
     if creds and creds.expired and creds.refresh_token:
         print("Refreshing expired token...")
@@ -58,7 +153,7 @@ def authenticate():
             print("(Create an OAuth 2.0 Client ID of type 'Desktop App')")
             sys.exit(1)
 
-        print("\nOpening browser for YouTube authorization...")
+        print("\nOpening browser for Google OAuth authorization...")
         flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRETS_FILE, SCOPES)
         creds = flow.run_local_server(port=0)
 
@@ -67,7 +162,64 @@ def authenticate():
             f.write(creds.to_json())
         print("Token saved — you won't need to authenticate again.\n")
 
+    return creds
+
+
+def authenticate():
+    """
+    Authenticate with YouTube via OAuth 2.0.
+    Returns an authorized YouTube API service object.
+    """
+    creds = get_credentials()
     return build("youtube", "v3", credentials=creds)
+
+
+def upload_to_drive(file_path):
+    """
+    Uploads a file to a Google Drive folder named 'Xenia Thumbnails'.
+    Creates the folder if it does not exist.
+    """
+    if not file_path or not os.path.exists(file_path):
+        return None
+        
+    print(f"  Uploading {os.path.basename(file_path)} to Google Drive...")
+    try:
+        creds = get_credentials()
+        drive_service = build("drive", "v3", credentials=creds)
+        
+        # 1. Find or create the target folder
+        folder_name = "Xenia Thumbnails"
+        query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        results = drive_service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
+        folders = results.get('files', [])
+        
+        if folders:
+            folder_id = folders[0]['id']
+        else:
+            print(f"  Creating Google Drive folder '{folder_name}'...")
+            folder_metadata = {
+                'name': folder_name,
+                'mimeType': 'application/vnd.google-apps.folder'
+            }
+            folder = drive_service.files().create(body=folder_metadata, fields='id').execute()
+            folder_id = folder.get('id')
+            
+        # 2. Determine mime type
+        mime = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
+        
+        # 3. Upload file
+        file_metadata = {
+            'name': os.path.basename(file_path),
+            'parents': [folder_id]
+        }
+        media = MediaFileUpload(file_path, mimetype=mime, resumable=True)
+        uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        
+        print(f"  ✅ Uploaded to Google Drive: {os.path.basename(file_path)} (ID: {uploaded_file.get('id')})")
+        return uploaded_file.get('id')
+    except Exception as e:
+        print(f"  ⚠️ Google Drive upload failed: {e}")
+        return None
 
 
 def _progress_bar(current, total, width=40):
@@ -171,7 +323,7 @@ def upload_video(youtube, video_path, metadata):
         video_path,
         mimetype="video/mp4",
         resumable=True,
-        chunksize=1024 * 1024,  # 1 MB chunks
+        chunksize=10 * 1024 * 1024,  # 10 MB chunks
     )
 
     request = youtube.videos().insert(
@@ -191,13 +343,25 @@ def upload_video(youtube, video_path, metadata):
             status, response = request.next_chunk()
             if status:
                 _progress_bar(status.resumable_progress, file_size)
+                # Reset retry count after a successful chunk upload
+                retry_count = 0
         except HttpError as e:
             if e.resp.status in RETRIABLE_STATUS_CODES and retry_count < MAX_RETRIES:
                 retry_count += 1
-                print(f"\n  Retryable error ({e.resp.status}), attempt {retry_count}/{MAX_RETRIES}...")
-                continue
+                sleep_time = (2 ** retry_count) + random.uniform(0, 1)
+                print(f"\n  Retryable HTTP error ({e.resp.status}), attempt {retry_count}/{MAX_RETRIES}. Retrying in {sleep_time:.2f}s...")
+                time.sleep(sleep_time)
             else:
                 print(f"\n\n  Upload failed: {e}")
+                return None
+        except RETRIABLE_EXCEPTIONS as e:
+            if retry_count < MAX_RETRIES:
+                retry_count += 1
+                sleep_time = (2 ** retry_count) + random.uniform(0, 1)
+                print(f"\n  Network/Timeout error ({type(e).__name__}: {e}), attempt {retry_count}/{MAX_RETRIES}. Retrying in {sleep_time:.2f}s...")
+                time.sleep(sleep_time)
+            else:
+                print(f"\n\n  Upload failed after maximum retries. Last error: {type(e).__name__}: {e}")
                 return None
 
     # Final 100%
@@ -205,6 +369,26 @@ def upload_video(youtube, video_path, metadata):
     print()  # newline after progress bar
 
     video_id = response["id"]
+
+    # ── Upload custom 4K thumbnail & Drive Backup ──
+    try:
+        thumb_file = get_thumbnail_path(video_path)
+        if thumb_file:
+            print(f"\n  Found styled thumbnail: {os.path.basename(thumb_file)}")
+            k4_thumb = prepare_4k_thumbnail(thumb_file)
+            if k4_thumb:
+                upload_thumbnail(youtube, video_id, k4_thumb)
+                try:
+                    os.remove(k4_thumb)
+                except Exception:
+                    pass
+            
+            # Upload original styled thumbnail to Google Drive folder
+            upload_to_drive(thumb_file)
+        else:
+            print("\n  ⚠️ No styled thumbnail found to upload as custom thumbnail.")
+    except Exception as e:
+        print(f"\n  ⚠️ Could not upload custom thumbnail/Drive backup: {e}")
 
     # ── Add to playlist ──
     try:
@@ -327,11 +511,64 @@ def main():
     if choice == "1":
         try:
             from pipeline import phase_metadata
+            import re
+            from thumbnail import strip_features
+            
             base_name = os.path.splitext(os.path.basename(video_path))[0]
             if base_name.lower().endswith("_subbed"):
                 base_name = base_name[:-7]
+            
+            # Try to guess artist and song from filename
+            guessed_artist = ""
+            guessed_song = ""
+            if " - " in base_name:
+                parts = base_name.split(" - ", 1)
+                guessed_artist = parts[0].strip()
+                guessed_song = parts[1].strip()
+            else:
+                guessed_song = base_name
+
+            # Clean common suffixes from guessed song/artist
+            clean_regex = r'\s*[\(\[][^\]\)]*(official|video|lyric|lyrics|audio|slowed|reverb|8d|music|clip|prod|remix|hd|4k)[^\]\)]*[\)\]]'
+            guessed_song = re.sub(clean_regex, '', guessed_song, flags=re.IGNORECASE).strip()
+            guessed_artist = re.sub(clean_regex, '', guessed_artist, flags=re.IGNORECASE).strip()
+            
+            # Strip features from artist
+            try:
+                guessed_artist = strip_features(guessed_artist)
+            except Exception:
+                pass
+
             print(f"\nPreparing auto-generated metadata for: {base_name}")
-            metadata = phase_metadata(source_url=None)
+            
+            artist_name = input(f"Artist Name [{guessed_artist}]: ").strip()
+            if not artist_name:
+                artist_name = guessed_artist
+            while not artist_name:
+                artist_name = input("Artist Name (required): ").strip()
+                
+            song_name = input(f"Song Name [{guessed_song}]: ").strip()
+            if not song_name:
+                song_name = guessed_song
+            while not song_name:
+                song_name = input("Song Name (required): ").strip()
+
+            # Parse effects if we can detect them in base_name (e.g. slowed, reverb, 8d)
+            effects = []
+            lower_base = base_name.lower()
+            if "slow" in lower_base:
+                effects.append("slow")
+            if "reverb" in lower_base:
+                effects.append("reverb")
+            if "8d" in lower_base:
+                effects.append("8d")
+
+            metadata = phase_metadata(
+                source_url=None,
+                artist_name=artist_name,
+                song_name=song_name,
+                effects=effects if effects else None
+            )
         except Exception as e:
             print(f"⚠️ Error running auto-generator: {e}")
             print("Falling back to manual input...")
