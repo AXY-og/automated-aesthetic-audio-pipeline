@@ -304,12 +304,31 @@ def _prompt_schedule():
 
         break
 
-    # ── Build datetime at 7:30 PM in chosen timezone, convert to UTC ──
+    # ── Pick time ──
+    default_time = "19:30"
+    while True:
+        time_input = input(f"  Time (HH:MM in 24h format) [default {default_time}]: ").strip()
+        if not time_input:
+            time_input = default_time
+
+        try:
+            parts = time_input.split(":")
+            if len(parts) != 2:
+                raise ValueError()
+            hour = int(parts[0])
+            minute = int(parts[1])
+            if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+                raise ValueError()
+            break
+        except ValueError:
+            print(f"  ⚠️  Invalid time '{time_input}'. Use HH:MM in 24-hour format (e.g. 19:30).")
+
+    # ── Build datetime in chosen timezone, convert to UTC ──
     local_dt = datetime(chosen_date.year, chosen_date.month, chosen_date.day,
-                        19, 30, 0, tzinfo=tz)
+                        hour, minute, 0, tzinfo=tz)
     utc_dt = local_dt.astimezone(ZoneInfo("UTC"))
 
-    print(f"\n  → {chosen_date.isoformat()} at 7:30 PM {tz_label}")
+    print(f"\n  → {chosen_date.isoformat()} at {time_input} {tz_label}")
     print(f"  → UTC: {utc_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
     return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.0Z")
