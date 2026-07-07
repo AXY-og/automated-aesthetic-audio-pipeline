@@ -447,7 +447,7 @@ def run_batch_pipeline():
         # to ensure the input folder is clean for the next song's Pinterest image
         for filename in os.listdir("input"):
             file_path = os.path.join("input", filename)
-            if os.path.isfile(file_path) and not filename.startswith(f"batch_{i}_"):
+            if os.path.isfile(file_path) and not filename.startswith("batch_"):
                 try:
                     os.unlink(file_path)
                 except Exception:
