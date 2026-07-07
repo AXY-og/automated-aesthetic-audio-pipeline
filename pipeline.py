@@ -412,7 +412,7 @@ def run_batch_pipeline():
         
         batch_audio = os.path.join("input", f"batch_{i}_audio.wav")
         batch_image = os.path.join("input", f"batch_{i}_image.png")
-        batch_thumb = os.path.join("output", f"batch_{i}_thumbnail.png")
+        batch_thumb = os.path.join("output", f"batch_{i}_audio.png")
         
         print(f"\n  Isolating assets for batch item {i}...")
         
