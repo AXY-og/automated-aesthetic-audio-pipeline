@@ -141,12 +141,43 @@ def upscale_and_update_thumbnail_from_link(video_url_or_id):
 
     print(f"\n🎬 Starting thumbnail upscale workflow for Video ID: {video_id}...")
     
-    # 2. Download highest quality auto-generated thumbnail
-    urls = [
+    # Authenticate first to support query of private/scheduled video metadata
+    print("  Authenticating with YouTube API...")
+    try:
+        youtube = authenticate()
+    except Exception as e:
+        print(f"❌ Error during authentication: {e}")
+        return False
+
+    # 2. Query YouTube Data API for thumbnail URLs
+    print("  Querying YouTube Data API for video metadata...")
+    api_thumbnail_url = None
+    try:
+        results = youtube.videos().list(part="snippet", id=video_id).execute()
+        items = results.get("items", [])
+        if items:
+            thumbnails = items[0]["snippet"].get("thumbnails", {})
+            # Try to get the highest resolution URL
+            for res_key in ["maxres", "standard", "high", "medium", "default"]:
+                if res_key in thumbnails:
+                    api_thumbnail_url = thumbnails[res_key].get("url")
+                    if api_thumbnail_url:
+                        print(f"  Found {res_key} thumbnail URL in API metadata.")
+                        break
+        else:
+            print("  ⚠️ Video not found in API search. It might be private or newly uploaded. Using fallbacks.")
+    except Exception as e:
+        print(f"  ⚠️ YouTube API metadata query failed: {e}. Using public fallbacks.")
+
+    # 3. Download highest quality thumbnail
+    urls = []
+    if api_thumbnail_url:
+        urls.append(api_thumbnail_url)
+    urls.extend([
         f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
         f"https://img.youtube.com/vi/{video_id}/sddefault.jpg",
         f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
-    ]
+    ])
     
     downloaded_path = None
     for url in urls:
@@ -155,7 +186,8 @@ def upscale_and_update_thumbnail_from_link(video_url_or_id):
             temp_path = temp_file.name
             temp_file.close()
             
-            print(f"  Fetching: {url}")
+            display_url = url.split('?')[0] if '?' in url else url
+            print(f"  Fetching: {display_url}")
             req = urllib.request.Request(
                 url, 
                 headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
@@ -179,7 +211,7 @@ def upscale_and_update_thumbnail_from_link(video_url_or_id):
         print("❌ Error: Failed to download any auto-generated thumbnail from YouTube.")
         return False
 
-    # 3. Upscale to 4K
+    # 4. Upscale to 4K
     print("  Upscaling thumbnail to 4K resolution...")
     k4_thumb_path = prepare_4k_thumbnail(downloaded_path)
     try:
@@ -191,10 +223,9 @@ def upscale_and_update_thumbnail_from_link(video_url_or_id):
         print("❌ Error: Failed to upscale the thumbnail.")
         return False
 
-    # 4. Authenticate and upload
-    print("  Authenticating with YouTube API...")
+    # 5. Upload upscaled thumbnail
+    print("  Uploading custom 4K thumbnail to YouTube...")
     try:
-        youtube = authenticate()
         success = upload_thumbnail(youtube, video_id, k4_thumb_path)
         if success:
             print(f"🎉 Successfully upscaled and updated thumbnail on YouTube for video: https://youtu.be/{video_id}")
@@ -207,7 +238,7 @@ def upscale_and_update_thumbnail_from_link(video_url_or_id):
             print("❌ Error: Thumbnail upload API call failed.")
             return False
     except Exception as e:
-        print(f"❌ Error during authentication or API call: {e}")
+        print(f"❌ Error during API upload: {e}")
         return False
     finally:
         try:
@@ -513,11 +544,28 @@ def upload_video(youtube, video_path, metadata):
     except Exception as e:
         print(f"\n  ⚠️ Could not upload custom thumbnail/Drive backup: {e}")
 
-    # ── Add to playlist ──
+    # ── Add to playlists dynamically ──
     try:
-        _add_to_playlist(youtube, video_id)
+        effects = metadata.get("effects")
+        # Default single video behavior if not specified
+        if effects is None:
+            effects = ["slow", "reverb", "8d"]
+
+        effects_set = set(effects)
+        target_playlists = ["xenia playlist"]
+
+        if effects_set == {"slow", "reverb", "8d"}:
+            target_playlists.append("slowed + reverbed + 8d")
+        elif effects_set == {"slow", "reverb"}:
+            target_playlists.append("slowed + reverbed")
+
+        for playlist_title in target_playlists:
+            try:
+                _add_to_playlist(youtube, video_id, playlist_title)
+            except Exception as e:
+                print(f"  ⚠️ Could not add to playlist '{playlist_title}': {e}")
     except Exception as e:
-        print(f"\n  ⚠️  Could not add to playlist: {e}")
+        print(f"\n  ⚠️ Playlist processing failed: {e}")
 
     return video_id
 
@@ -548,7 +596,7 @@ def _create_playlist(youtube, title):
         body={
             "snippet": {
                 "title": title,
-                "description": "Slowed + reverbed + 8D audio edits.",
+                "description": f"{title} audio edits.",
             },
             "status": {
                 "privacyStatus": "public",
@@ -558,13 +606,13 @@ def _create_playlist(youtube, title):
     return response["id"]
 
 
-def _add_to_playlist(youtube, video_id):
-    """Add a video to the slowed+reverbed+8d playlist, creating it if needed."""
-    playlist_id = _find_playlist(youtube, PLAYLIST_TITLE)
+def _add_to_playlist(youtube, video_id, playlist_title):
+    """Add a video to the specified playlist, creating it if needed."""
+    playlist_id = _find_playlist(youtube, playlist_title)
 
     if not playlist_id:
-        print(f"\n  Creating playlist '{PLAYLIST_TITLE}'...")
-        playlist_id = _create_playlist(youtube, PLAYLIST_TITLE)
+        print(f"\n  Creating playlist '{playlist_title}'...")
+        playlist_id = _create_playlist(youtube, playlist_title)
         print(f"  ✅ Playlist created: {playlist_id}")
 
     youtube.playlistItems().insert(
@@ -579,7 +627,7 @@ def _add_to_playlist(youtube, video_id):
             },
         },
     ).execute()
-    print(f"  ✅ Added to playlist '{PLAYLIST_TITLE}'")
+    print(f"  ✅ Added to playlist '{playlist_title}'")
 
 
 def main():

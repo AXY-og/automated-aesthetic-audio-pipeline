@@ -215,6 +215,7 @@ I do not own the music or the artwork used in this video. All rights belong to t
         "tags": tags,
         "category_id": "10",         # Music
         "privacy_status": "unlisted",
+        "effects": effects,
     }
 
     # ── Save to file ──
