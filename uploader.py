@@ -92,6 +92,129 @@ def upload_thumbnail(youtube, video_id, thumbnail_path):
         print(f"  ⚠️ Custom thumbnail upload failed: {e}")
         return False
 
+
+def upscale_and_update_thumbnail_from_link(video_url_or_id):
+    """
+    Given a YouTube video link or ID:
+    - Extracts the 11-char video ID.
+    - Downloads the highest available auto-generated thumbnail from YouTube's server.
+    - Upscales it to 4K resolution (3840x2160) and optimizes to stay under 2MB.
+    - Authenticates and uploads the upscaled thumbnail to the video on YouTube.
+    - Backs up the upscaled thumbnail to the Google Drive folder "Xenia Thumbnails".
+    """
+    import urllib.request
+    import urllib.parse as urlparse
+    import re
+    import tempfile
+    
+    # 1. Extract video ID
+    video_id = video_url_or_id.strip()
+    if len(video_id) != 11:
+        try:
+            parsed = urlparse.urlparse(video_url_or_id)
+            if parsed.hostname in ('youtu.be', 'www.youtu.be'):
+                video_id = parsed.path[1:]
+            elif parsed.hostname in ('youtube.com', 'www.youtube.com', 'm.youtube.com'):
+                if parsed.path == '/watch':
+                    p = urlparse.parse_qs(parsed.query)
+                    video_id = p.get('v', [None])[0]
+                elif parsed.path.startswith('/embed/'):
+                    video_id = parsed.path.split('/')[2]
+                elif parsed.path.startswith('/v/'):
+                    video_id = parsed.path.split('/')[2]
+                elif parsed.path.startswith('/shorts/'):
+                    video_id = parsed.path.split('/')[2]
+            else:
+                match = re.search(r"[?&]v=([^&#]+)", video_url_or_id)
+                if match:
+                    video_id = match.group(1)
+                else:
+                    match = re.search(r"shorts/([^&#/]+)", video_url_or_id)
+                    if match:
+                        video_id = match.group(1)
+        except Exception:
+            pass
+
+    if not video_id or len(video_id) != 11:
+        print(f"❌ Error: Could not extract a valid 11-character YouTube video ID from: {video_url_or_id}")
+        return False
+
+    print(f"\n🎬 Starting thumbnail upscale workflow for Video ID: {video_id}...")
+    
+    # 2. Download highest quality auto-generated thumbnail
+    urls = [
+        f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
+        f"https://img.youtube.com/vi/{video_id}/sddefault.jpg",
+        f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+    ]
+    
+    downloaded_path = None
+    for url in urls:
+        try:
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            temp_path = temp_file.name
+            temp_file.close()
+            
+            print(f"  Fetching: {url}")
+            req = urllib.request.Request(
+                url, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            )
+            with urllib.request.urlopen(req) as response, open(temp_path, 'wb') as out_file:
+                out_file.write(response.read())
+            
+            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 5000:
+                downloaded_path = temp_path
+                print(f"  ✅ Downloaded source image ({os.path.getsize(temp_path)/(1024):.1f} KB)")
+                break
+            else:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+        except Exception:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            continue
+
+    if not downloaded_path:
+        print("❌ Error: Failed to download any auto-generated thumbnail from YouTube.")
+        return False
+
+    # 3. Upscale to 4K
+    print("  Upscaling thumbnail to 4K resolution...")
+    k4_thumb_path = prepare_4k_thumbnail(downloaded_path)
+    try:
+        os.remove(downloaded_path)
+    except Exception:
+        pass
+
+    if not k4_thumb_path:
+        print("❌ Error: Failed to upscale the thumbnail.")
+        return False
+
+    # 4. Authenticate and upload
+    print("  Authenticating with YouTube API...")
+    try:
+        youtube = authenticate()
+        success = upload_thumbnail(youtube, video_id, k4_thumb_path)
+        if success:
+            print(f"🎉 Successfully upscaled and updated thumbnail on YouTube for video: https://youtu.be/{video_id}")
+            try:
+                upload_to_drive(k4_thumb_path)
+            except Exception as e:
+                print(f"  ⚠️ Could not upload upscaled thumbnail to Google Drive: {e}")
+            return True
+        else:
+            print("❌ Error: Thumbnail upload API call failed.")
+            return False
+    except Exception as e:
+        print(f"❌ Error during authentication or API call: {e}")
+        return False
+    finally:
+        try:
+            os.remove(k4_thumb_path)
+        except Exception:
+            pass
+
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube",          # playlists
@@ -460,39 +583,57 @@ def _add_to_playlist(youtube, video_id):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="YouTube Video Uploader & Utility CLI")
+    parser.add_argument("video_path", nargs="?", help="Path to the video file to upload")
+    parser.add_argument("--upscale-thumbnail", help="YouTube video URL/ID to fetch its thumbnail, upscale to 4K, and update it")
+    
+    args, unknown = parser.parse_known_args()
+    
+    if args.upscale_thumbnail:
+        upscale_and_update_thumbnail_from_link(args.upscale_thumbnail)
+        return
+
     print("=======================================================")
     print("  YOUTUBE VIDEO UPLOADER")
     print("=======================================================")
 
-    # 1. Select video
-    output_dir = "output"
-    if not os.path.exists(output_dir):
-        print(f"❌ Error: Directory '{output_dir}' does not exist.")
-        sys.exit(1)
+    video_path = None
+    if args.video_path:
+        video_path = args.video_path
+        if not os.path.exists(video_path):
+            print(f"❌ Error: File '{video_path}' does not exist.")
+            sys.exit(1)
+    else:
+        # 1. Select video
+        output_dir = "output"
+        if not os.path.exists(output_dir):
+            print(f"❌ Error: Directory '{output_dir}' does not exist.")
+            sys.exit(1)
 
-    videos = [f for f in os.listdir(output_dir) if f.lower().endswith(".mp4")]
-    videos.sort()
+        videos = [f for f in os.listdir(output_dir) if f.lower().endswith(".mp4")]
+        videos.sort()
 
-    if not videos:
-        print(f"⚠️ No video files (.mp4) found in '{output_dir}/'.")
-        sys.exit(0)
+        if not videos:
+            print(f"⚠️ No video files (.mp4) found in '{output_dir}/'.")
+            sys.exit(0)
 
-    print("\nAvailable videos in output/:")
-    for idx, f in enumerate(videos, 1):
-        print(f"  {idx}) {f}")
+        print("\nAvailable videos in output/:")
+        for idx, f in enumerate(videos, 1):
+            print(f"  {idx}) {f}")
 
-    while True:
-        try:
-            sel = input(f"Select a video file (1-{len(videos)}): ").strip()
-            if not sel:
-                continue
-            sel_idx = int(sel) - 1
-            if 0 <= sel_idx < len(videos):
-                video_path = os.path.join(output_dir, videos[sel_idx])
-                break
-            print(f"Please enter a number between 1 and {len(videos)}.")
-        except ValueError:
-            print("Invalid input. Please enter a valid number.")
+        while True:
+            try:
+                sel = input(f"Select a video file (1-{len(videos)}): ").strip()
+                if not sel:
+                    continue
+                sel_idx = int(sel) - 1
+                if 0 <= sel_idx < len(videos):
+                    video_path = os.path.join(output_dir, videos[sel_idx])
+                    break
+                print(f"Please enter a number between 1 and {len(videos)}.")
+            except ValueError:
+                print("Invalid input. Please enter a valid number.")
 
     print(f"\nSelected video: {os.path.basename(video_path)}")
 
