@@ -216,13 +216,16 @@ RESOLUTION_PROFILES = {
 }
 
 
-def combine(image_path, audio_path, output_path, profile, youtube_url=None, existing_thumb=None):
+def combine(image_path, audio_path, output_path, profile, youtube_url=None, existing_thumb=None, use_motion=None):
     # Use the pre-generated thumbnail if available (avoids double generation)
     thumb_path = os.path.splitext(output_path)[0] + ".png"
 
-    # Prompt for rhythmic background motion
-    use_motion = input("  Use rhythmic background motion? (y/n) [default y]: ").strip().lower()
-    if use_motion != "n":
+    # Prompt for rhythmic background motion if not pre-configured
+    if use_motion is None:
+        use_motion_choice = input("  Use rhythmic background motion? (y/n) [default y]: ").strip().lower()
+        use_motion = use_motion_choice != "n"
+        
+    if use_motion:
         config_path = (existing_thumb + ".config.json") if existing_thumb else (thumb_path + ".config.json")
         if os.path.exists(config_path):
             try:
@@ -354,7 +357,7 @@ def download_youtube_audio(url):
     return find_file(INPUT_DIR, ["wav"]), yt_meta
 
 
-def main(skip_effects=False):
+def main(skip_effects=False, interactive_only=False):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(TEMP_DIR, exist_ok=True)
 
@@ -517,6 +520,43 @@ def main(skip_effects=False):
                 "hz": prompt_float("Pan speed Hz", 0.125)
             }
 
+    # Prompt for resolution
+    print("\nSelect target video resolution:")
+    print("  1) 4K (3840x2160) [Default/Recommended]")
+    print("  2) 1440p (2560x1440)")
+    print("  3) 1080p (1920x1080)")
+    res_choice = input("Enter 1, 2 or 3: ").strip()
+    if res_choice not in RESOLUTION_PROFILES:
+        res_choice = "1"
+    profile = RESOLUTION_PROFILES[res_choice]
+    print(f"  ↳ Selected: {profile['label']}")
+
+    # Prompt for test render mode
+    test_mode = input("\nRender a short test snippet (15s) instead of the full video? (y/n) [default n]: ").strip().lower()
+
+    # Prompt for rhythmic background motion
+    use_motion_choice = input("  Use rhythmic background motion? (y/n) [default y]: ").strip().lower()
+    use_motion = use_motion_choice != "n"
+
+    # Return config immediately if in interactive_only mode
+    if interactive_only:
+        name = os.path.splitext(os.path.basename(audio))[0]
+        existing_thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
+        return {
+            "audio_path": audio,
+            "image_path": image,
+            "thumbnail_path": existing_thumb_path,
+            "artist_name": artist_name,
+            "song_name": song_name,
+            "effects": effects,
+            "settings": settings,
+            "profile": profile,
+            "test_mode": test_mode,
+            "use_motion": use_motion,
+            "source_url": source_url,
+            "yt_meta": yt_meta,
+        }
+
     # Process chain
     current = audio
     step = 0
@@ -539,22 +579,7 @@ def main(skip_effects=False):
         apply_8d(current, out, **settings["8d"])
         current, step = out, step + 1
 
-    # Prompt for resolution
-    print("\nSelect target video resolution:")
-    print("  1) 4K (3840x2160) [Default/Recommended]")
-    print("  2) 1440p (2560x1440)")
-    print("  3) 1080p (1920x1080)")
-    res_choice = input("Enter 1, 2 or 3: ").strip()
-    if res_choice not in RESOLUTION_PROFILES:
-        res_choice = "1"
-    profile = RESOLUTION_PROFILES[res_choice]
-    print(f"  ↳ Selected: {profile['label']}")
-
-    # Combine — pass any pre-generated thumbnail to avoid double generation
     name = os.path.splitext(os.path.basename(audio))[0]
-    
-    # Prompt for test render mode
-    test_mode = input("\nRender a short test snippet (15s) instead of the full video? (y/n) [default n]: ").strip().lower()
     if test_mode == "y":
         output_path = os.path.join(OUTPUT_DIR, f"{name}_test.mp4")
         print(f"  🧪 Test mode enabled! Output: {os.path.basename(output_path)}")
@@ -565,12 +590,75 @@ def main(skip_effects=False):
 
     print("Combining audio and image...")
     combine(image, current, output_path, profile, youtube_url=source_url,
-            existing_thumb=existing_thumb_path if os.path.exists(existing_thumb_path) else None)
+            existing_thumb=existing_thumb_path if os.path.exists(existing_thumb_path) else None,
+            use_motion=use_motion)
 
     shutil.rmtree(TEMP_DIR)
     print(f"\nDone → {output_path}")
     speed_factor = settings.get("slow", {}).get("speed", 1.0)
     yt_meta = locals().get("yt_meta", {})
+    return {
+        "video_path": output_path,
+        "source_url": source_url,
+        "speed_factor": speed_factor,
+        "effects": effects,
+        "yt_meta": yt_meta,
+    }
+
+
+def execute_task(task_config):
+    """Executes the heavy processing and rendering for a pre-configured task."""
+    audio = task_config["audio_path"]
+    image = task_config["image_path"]
+    existing_thumb_path = task_config["thumbnail_path"]
+    effects = task_config["effects"]
+    settings = task_config["settings"]
+    profile = task_config["profile"]
+    test_mode = task_config["test_mode"]
+    use_motion = task_config["use_motion"]
+    source_url = task_config["source_url"]
+    yt_meta = task_config["yt_meta"]
+
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    current = audio
+    step = 0
+
+    if "slow" in effects:
+        print("\nApplying slow...")
+        out = os.path.join(TEMP_DIR, f"{step}_slow.wav")
+        apply_slow(current, out, **settings["slow"])
+        current, step = out, step + 1
+
+    if "reverb" in effects:
+        print("Applying reverb...")
+        out = os.path.join(TEMP_DIR, f"{step}_reverb.wav")
+        apply_reverb(current, out, **settings["reverb"])
+        current, step = out, step + 1
+
+    if "8d" in effects:
+        print("Applying 8D...")
+        out = os.path.join(TEMP_DIR, f"{step}_8d.wav")
+        apply_8d(current, out, **settings["8d"])
+        current, step = out, step + 1
+
+    name = os.path.splitext(os.path.basename(audio))[0]
+    if test_mode == "y":
+        output_path = os.path.join(OUTPUT_DIR, f"{name}_test.mp4")
+        print(f"  🧪 Test mode enabled! Output: {os.path.basename(output_path)}")
+    else:
+        output_path = os.path.join(OUTPUT_DIR, f"{name}.mp4")
+
+    print("Combining audio and image...")
+    combine(image, current, output_path, profile, youtube_url=source_url,
+            existing_thumb=existing_thumb_path if os.path.exists(existing_thumb_path) else None,
+            use_motion=use_motion)
+
+    if os.path.exists(TEMP_DIR):
+        shutil.rmtree(TEMP_DIR)
+        
+    print(f"\nDone → {output_path}")
+    speed_factor = settings.get("slow", {}).get("speed", 1.0)
+    
     return {
         "video_path": output_path,
         "source_url": source_url,

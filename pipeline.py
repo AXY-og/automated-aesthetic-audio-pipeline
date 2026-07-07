@@ -358,106 +358,356 @@ def phase_upload(video_path, metadata):
         sys.exit(1)
 
 
+def run_batch_pipeline():
+    print("\n=======================================================")
+    print("  XENIA BATCH QUEUE GENERATOR")
+    print("=======================================================")
+    
+    try:
+        num_songs = int(input("How many songs would you like to queue? ").strip())
+    except ValueError:
+        print("Invalid number. Exiting.")
+        return
+
+    if num_songs <= 0:
+        print("Number of songs must be greater than 0. Exiting.")
+        return
+
+    queued_tasks = []
+
+    for i in range(1, num_songs + 1):
+        print(f"\n" + "=" * 55)
+        print(f"  CONFIGURING SONG {i} OF {num_songs}")
+        print("=" * 55)
+
+        # 1. Run interactive configuration
+        import fx
+        task_config = fx.main(interactive_only=True)
+        if not task_config:
+            print(f"❌ Configuration for song {i} failed. Exiting.")
+            return
+
+        # 2. Isolate files by renaming/moving them to prevent collisions
+        import shutil
+        import json
+        
+        batch_audio = os.path.join("input", f"batch_{i}_audio.wav")
+        batch_image = os.path.join("input", f"batch_{i}_image.png")
+        batch_thumb = os.path.join("output", f"batch_{i}_thumbnail.png")
+        
+        print(f"\n  Isolating assets for batch item {i}...")
+        
+        # Move raw downloaded audio
+        if os.path.exists(task_config["audio_path"]):
+            shutil.move(task_config["audio_path"], batch_audio)
+        else:
+            print(f"  ⚠️ Audio file not found at: {task_config['audio_path']}")
+            
+        # Move cropped square image
+        if os.path.exists(task_config["image_path"]):
+            shutil.move(task_config["image_path"], batch_image)
+        else:
+            print(f"  ⚠️ Cropped image file not found at: {task_config['image_path']}")
+            
+        # Move generated styled thumbnail
+        if os.path.exists(task_config["thumbnail_path"]):
+            shutil.move(task_config["thumbnail_path"], batch_thumb)
+        else:
+            print(f"  ⚠️ Thumbnail file not found at: {task_config['thumbnail_path']}")
+
+        # Move config.json and overlay.png if they exist
+        old_config = task_config["thumbnail_path"] + ".config.json"
+        new_config = batch_thumb + ".config.json"
+        if os.path.exists(old_config):
+            shutil.move(old_config, new_config)
+            
+        old_overlay = task_config["thumbnail_path"] + ".overlay.png"
+        new_overlay = batch_thumb + ".overlay.png"
+        if os.path.exists(old_overlay):
+            shutil.move(old_overlay, new_overlay)
+
+        # Update the configuration file contents to point to new paths
+        if os.path.exists(new_config):
+            try:
+                with open(new_config, "r") as f:
+                    cfg_data = json.load(f)
+                cfg_data["center_image"] = os.path.abspath(batch_image)
+                cfg_data["overlay_image"] = os.path.abspath(new_overlay)
+                with open(new_config, "w") as f:
+                    json.dump(cfg_data, f, indent=2)
+            except Exception as e:
+                print(f"  ⚠️ Failed to update configuration JSON paths: {e}")
+
+        # Update task paths
+        task_config["audio_path"] = batch_audio
+        task_config["image_path"] = batch_image
+        task_config["thumbnail_path"] = batch_thumb
+
+        # Clean up any leftover temp files in input directory (like download leftovers)
+        # to ensure the input folder is clean for the next song's Pinterest image
+        for filename in os.listdir("input"):
+            file_path = os.path.join("input", filename)
+            if os.path.isfile(file_path) and not filename.startswith(f"batch_{i}_"):
+                try:
+                    os.unlink(file_path)
+                except Exception:
+                    pass
+
+        # 3. Parse details for subtitles & metadata
+        yt_meta = task_config["yt_meta"]
+        if "confirmed_artist" in yt_meta and "confirmed_song" in yt_meta:
+            artist_name = yt_meta["confirmed_artist"]
+            song_name = yt_meta["confirmed_song"]
+        else:
+            artist_name = yt_meta.get("artist", "")
+            song_name = ""
+            yt_title = yt_meta.get("yt_title", "")
+            if yt_title:
+                if not artist_name and " - " in yt_title:
+                    parts = yt_title.split(" - ", 1)
+                    artist_name = parts[0].strip()
+                    song_name = parts[1].strip()
+                elif " - " in yt_title:
+                    song_name = yt_title.split(" - ", 1)[1].strip()
+                else:
+                    song_name = yt_title
+                # Clean video suffixes
+                clean_regex = r'\s*[\(\[][^\]\)]*(official|video|lyric|lyrics|audio|slowed|reverb|8d|music|clip|prod|remix|hd|4k)[^\]\)]*[\)\]]'
+                song_name = re.sub(clean_regex, '', song_name, flags=re.IGNORECASE).strip()
+                artist_name = re.sub(clean_regex, '', artist_name, flags=re.IGNORECASE).strip()
+                from thumbnail import strip_features
+                artist_name = strip_features(artist_name)
+
+        # Prompt for subtitles choice
+        print("\n  Subtitles / Synced Lyrics Configuration:")
+        burn_subs_choice = input("  Do you want to burn synced subtitles onto the video? (y/n) [default n]: ").strip().lower()
+        burn_subs = burn_subs_choice == "y"
+        
+        chosen_speed = 1.0
+        if burn_subs:
+            speed_factor = task_config.get("settings", {}).get("slow", {}).get("speed", 1.0)
+            print(f"  ↳ Detected speed factor: {speed_factor}")
+            speed_raw = input(f"  Playback speed factor [default {speed_factor}]: ").strip()
+            try:
+                chosen_speed = float(speed_raw) if speed_raw else speed_factor
+            except ValueError:
+                chosen_speed = speed_factor
+
+        # 4. Phase metadata setup
+        print("\n  YouTube Upload Metadata Configuration:")
+        metadata = phase_metadata(
+            task_config["source_url"],
+            artist_name=artist_name,
+            song_name=song_name,
+            effects=task_config["effects"],
+            artist_link=yt_meta.get("channel_url", ""),
+            original_link=task_config["source_url"],
+        )
+
+        task_config["burn_subs"] = burn_subs
+        task_config["chosen_speed"] = chosen_speed
+        task_config["artist_name"] = artist_name
+        task_config["song_name"] = song_name
+        task_config["metadata"] = metadata
+
+        queued_tasks.append(task_config)
+        print(f"✅ Configured Song {i} successfully and added to queue.")
+
+    # Loop to process the configured queue
+    print("\n" + "=" * 55)
+    print("  STARTING BATCH PROCESSING LOOP")
+    print("=" * 55 + "\n")
+
+    for idx, task in enumerate(queued_tasks, 1):
+        artist_name = task["artist_name"]
+        song_name = task["song_name"]
+        
+        print(f"\n" + "─" * 55)
+        print(f"  PROCESSING TASK {idx} OF {num_songs}: {artist_name} - {song_name}")
+        print("─" * 55)
+
+        try:
+            # 1. Heavy video generation
+            import fx
+            gen_res = fx.execute_task(task)
+            video_path = gen_res["video_path"]
+
+            # 2. Burn subtitles if enabled
+            if task["burn_subs"]:
+                import lyrics
+                print(f"\n  Searching synced lyrics for \"{artist_name} - {song_name}\"...")
+                lyrics_res = lyrics.get_lyrics(artist_name, song_name)
+                if lyrics_res and "syncedLyrics" in lyrics_res:
+                    print("  ✅ Synced lyrics found!")
+                    dest_dir = os.path.dirname(video_path)
+                    dest_base = os.path.splitext(os.path.basename(video_path))[0]
+                    subbed_video_path = os.path.join(dest_dir, f"{dest_base}_subbed.mp4")
+
+                    print("  Burning subtitles onto the video...")
+                    success = lyrics.burn_subtitles_from_lrc(
+                        video_path,
+                        lyrics_res["syncedLyrics"],
+                        subbed_video_path,
+                        speed_factor=task["chosen_speed"]
+                    )
+                    if success and os.path.exists(subbed_video_path):
+                        print(f"  ✅ Subtitles burned successfully: {subbed_video_path}")
+                        video_path = subbed_video_path
+                    else:
+                        print("  ❌ Subtitle burning failed. Proceeding with clean video.")
+                else:
+                    print("  ❌ Synced lyrics not found. Proceeding with clean video.")
+
+            # 3. Upload video
+            from uploader import authenticate, upload_video
+            youtube = authenticate()
+            video_id = upload_video(youtube, video_path, task["metadata"])
+
+            if video_id:
+                url = f"https://www.youtube.com/watch?v={video_id}"
+                print("\n" + "=" * 55)
+                print(f"  ✅ Task {idx} Upload complete!")
+                print(f"  🔗 {url}")
+                print("=" * 55 + "\n")
+            else:
+                print(f"\n  ❌ Task {idx} upload failed.")
+
+        except Exception as e:
+            print(f"\n  ❌ Task {idx} failed with error: {e}")
+
+        # 4. Immediate cleanup of files for this index to keep disk space minimal
+        print(f"🧹 Cleaning up assets for task {idx}...")
+        batch_prefix = f"batch_{idx}_"
+        for folder in ["input", "output"]:
+            if os.path.exists(folder):
+                for filename in os.listdir(folder):
+                    if filename.startswith(batch_prefix):
+                        file_path = os.path.join(folder, filename)
+                        try:
+                            if os.path.isfile(file_path) or os.path.islink(file_path):
+                                os.unlink(file_path)
+                            elif os.path.isdir(file_path):
+                                shutil.rmtree(file_path)
+                        except Exception as e:
+                            print(f"  ⚠️ Failed to delete {file_path}: {e}")
+
+    print("\n=======================================================")
+    print("  ALL BATCH TASKS COMPLETED SUCCESSFULLY!")
+    print("=======================================================\n")
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 def main():
-    result = phase_video_generation()
-    video_path = result["video_path"]
-    source_url = result.get("source_url", "")
-    speed_factor = result.get("speed_factor", 1.0)
-    effects = result.get("effects", [])
-    yt_meta = result.get("yt_meta", {})
-
-    # ── Parse artist / song from scraped YouTube title ──
-    if "confirmed_artist" in yt_meta and "confirmed_song" in yt_meta:
-        artist_name = yt_meta["confirmed_artist"]
-        song_name = yt_meta["confirmed_song"]
+    print("=======================================================")
+    print("  XENIA AUTOMATED PIPELINE")
+    print("=======================================================")
+    print("Select pipeline mode:")
+    print("  1) Single song generator [Default]")
+    print("  2) Batch queue generator")
+    mode = input("Enter 1 or 2 [default 1]: ").strip()
+    
+    if mode == "2":
+        run_batch_pipeline()
     else:
-        artist_name = yt_meta.get("artist", "")
-        song_name = ""
-        yt_title = yt_meta.get("yt_title", "")
+        # Original single song flow
+        result = phase_video_generation()
+        video_path = result["video_path"]
+        source_url = result.get("source_url", "")
+        speed_factor = result.get("speed_factor", 1.0)
+        effects = result.get("effects", [])
+        yt_meta = result.get("yt_meta", {})
 
-        if yt_title:
-            # Same parsing logic as thumbnail.py — split "Artist - Title"
-            if not artist_name and " - " in yt_title:
-                parts = yt_title.split(" - ", 1)
-                artist_name = parts[0].strip()
-                song_name = parts[1].strip()
-            elif " - " in yt_title:
-                song_name = yt_title.split(" - ", 1)[1].strip()
-            else:
-                song_name = yt_title
-
-            # Clean common video suffixes
-            clean_regex = r'\s*[\(\[][^\]\)]*(official|video|lyric|lyrics|audio|slowed|reverb|8d|music|clip|prod|remix|hd|4k)[^\]\)]*[\)\]]'
-            song_name = re.sub(clean_regex, '', song_name, flags=re.IGNORECASE).strip()
-            artist_name = re.sub(clean_regex, '', artist_name, flags=re.IGNORECASE).strip()
-
-            # Strip featured artists — keep only the primary artist
-            from thumbnail import strip_features
-            artist_name = strip_features(artist_name)
-
-    channel_url = yt_meta.get("channel_url", "")
-
-    # ── Phase 1.5: Subtitles / Lyrics ─────────────────────────────────────
-    print("\n" + "=" * 55)
-    print("  PHASE 1.5 — SUBTITLES / LYRICS")
-    print("=" * 55)
-
-    if artist_name and song_name:
-        print(f"\n  Detected: {artist_name} - {song_name}")
-
-    burn_subs = input("\nDo you want to burn synced subtitles onto the video? (y/n) [default n]: ").strip().lower()
-    if burn_subs == "y":
-        if not artist_name or not song_name:
-            print()
-            artist_name = artist_name or input("  Artist name: ").strip()
-            song_name = song_name or input("  Song name:   ").strip()
-
-        # Speed factor from Phase 1
-        print(f"\n  Detected speed factor from Phase 1: {speed_factor}")
-        speed_raw = input(f"    Playback speed factor [default {speed_factor}]: ").strip()
-        try:
-            chosen_speed = float(speed_raw) if speed_raw else speed_factor
-        except ValueError:
-            print(f"    Invalid float, using default: {speed_factor}")
-            chosen_speed = speed_factor
-
-        import lyrics
-        print(f"\n  Searching synced lyrics for \"{artist_name} - {song_name}\"...")
-        lyrics_res = lyrics.get_lyrics(artist_name, song_name)
-        if lyrics_res and "syncedLyrics" in lyrics_res:
-            print("  ✅ Synced lyrics found!")
-            # Determine subbed path
-            dest_dir = os.path.dirname(video_path)
-            dest_base = os.path.splitext(os.path.basename(video_path))[0]
-            subbed_video_path = os.path.join(dest_dir, f"{dest_base}_subbed.mp4")
-
-            print("  Burning subtitles onto the video...")
-            success = lyrics.burn_subtitles_from_lrc(
-                video_path,
-                lyrics_res["syncedLyrics"],
-                subbed_video_path,
-                speed_factor=chosen_speed
-            )
-            if success and os.path.exists(subbed_video_path):
-                print(f"  ✅ Subtitles burned successfully: {subbed_video_path}")
-                video_path = subbed_video_path
-            else:
-                print("  ❌ Subtitle burning failed. Proceeding with clean video.")
+        # ── Parse artist / song from scraped YouTube title ──
+        if "confirmed_artist" in yt_meta and "confirmed_song" in yt_meta:
+            artist_name = yt_meta["confirmed_artist"]
+            song_name = yt_meta["confirmed_song"]
         else:
-            print("  ❌ Synced lyrics not found. Proceeding with clean video.")
+            artist_name = yt_meta.get("artist", "")
+            song_name = ""
+            yt_title = yt_meta.get("yt_title", "")
 
-    metadata = phase_metadata(
-        source_url,
-        artist_name=artist_name,
-        song_name=song_name,
-        effects=effects,
-        artist_link=channel_url,
-        original_link=source_url,
-    )
+            if yt_title:
+                # Same parsing logic as thumbnail.py — split "Artist - Title"
+                if not artist_name and " - " in yt_title:
+                    parts = yt_title.split(" - ", 1)
+                    artist_name = parts[0].strip()
+                    song_name = parts[1].strip()
+                elif " - " in yt_title:
+                    song_name = yt_title.split(" - ", 1)[1].strip()
+                else:
+                    song_name = yt_title
 
-    phase_upload(video_path, metadata)
+                # Clean common video suffixes
+                clean_regex = r'\s*[\(\[][^\]\)]*(official|video|lyric|lyrics|audio|slowed|reverb|8d|music|clip|prod|remix|hd|4k)[^\]\)]*[\)\]]'
+                song_name = re.sub(clean_regex, '', song_name, flags=re.IGNORECASE).strip()
+                artist_name = re.sub(clean_regex, '', artist_name, flags=re.IGNORECASE).strip()
+
+                # Strip featured artists — keep only the primary artist
+                from thumbnail import strip_features
+                artist_name = strip_features(artist_name)
+
+        channel_url = yt_meta.get("channel_url", "")
+
+        # ── Phase 1.5: Subtitles / Lyrics ─────────────────────────────────────
+        print("\n" + "=" * 55)
+        print("  PHASE 1.5 — SUBTITLES / LYRICS")
+        print("=" * 55)
+
+        if artist_name and song_name:
+            print(f"\n  Detected: {artist_name} - {song_name}")
+
+        burn_subs = input("\nDo you want to burn synced subtitles onto the video? (y/n) [default n]: ").strip().lower()
+        if burn_subs == "y":
+            if not artist_name or not song_name:
+                print()
+                artist_name = artist_name or input("  Artist name: ").strip()
+                song_name = song_name or input("  Song name:   ").strip()
+
+            # Speed factor from Phase 1
+            print(f"\n  Detected speed factor from Phase 1: {speed_factor}")
+            speed_raw = input(f"    Playback speed factor [default {speed_factor}]: ").strip()
+            try:
+                chosen_speed = float(speed_raw) if speed_raw else speed_factor
+            except ValueError:
+                print(f"    Invalid float, using default: {speed_factor}")
+                chosen_speed = speed_factor
+
+            import lyrics
+            print(f"\n  Searching synced lyrics for \"{artist_name} - {song_name}\"...")
+            lyrics_res = lyrics.get_lyrics(artist_name, song_name)
+            if lyrics_res and "syncedLyrics" in lyrics_res:
+                print("  ✅ Synced lyrics found!")
+                # Determine subbed path
+                dest_dir = os.path.dirname(video_path)
+                dest_base = os.path.splitext(os.path.basename(video_path))[0]
+                subbed_video_path = os.path.join(dest_dir, f"{dest_base}_subbed.mp4")
+
+                print("  Burning subtitles onto the video...")
+                success = lyrics.burn_subtitles_from_lrc(
+                    video_path,
+                    lyrics_res["syncedLyrics"],
+                    subbed_video_path,
+                    speed_factor=chosen_speed
+                )
+                if success and os.path.exists(subbed_video_path):
+                    print(f"  ✅ Subtitles burned successfully: {subbed_video_path}")
+                    video_path = subbed_video_path
+                else:
+                    print("  ❌ Subtitle burning failed. Proceeding with clean video.")
+            else:
+                print("  ❌ Synced lyrics not found. Proceeding with clean video.")
+
+        metadata = phase_metadata(
+            source_url,
+            artist_name=artist_name,
+            song_name=song_name,
+            effects=effects,
+            artist_link=channel_url,
+            original_link=source_url,
+        )
+
+        phase_upload(video_path, metadata)
 
 
 if __name__ == "__main__":
