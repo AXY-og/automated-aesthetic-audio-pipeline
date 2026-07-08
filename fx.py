@@ -774,9 +774,18 @@ def main(skip_effects=False, interactive_only=False):
         effects = []
         settings = {}
     else:
-        print("\nAvailable effects: slow, reverb, 8d")
-        raw = input("Which effects? (comma separated, Enter for all): ").strip().lower()
-        effects = ["slow", "reverb", "8d"] if not raw else [e.strip() for e in raw.split(",")]
+        print("\nAvailable effects: s: slow, r: reverb, 8: 8d")
+        raw = input("Which effects? (e.g. sr8, rs, or Enter for all): ").strip().lower()
+        if not raw:
+            effects = ["slow", "reverb", "8d"]
+        else:
+            effects = []
+            if "s" in raw:
+                effects.append("slow")
+            if "r" in raw:
+                effects.append("reverb")
+            if "8" in raw:
+                effects.append("8d")
 
         print(f"\nApplying: {', '.join(effects)}")
 
