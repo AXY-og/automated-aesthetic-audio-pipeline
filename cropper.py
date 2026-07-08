@@ -1502,6 +1502,19 @@ class CropperApp:
             t["center_x"] = not t.get("center_x", False)
             self._render()
 
+    def _get_color_config(self):
+        return {
+            "color_grade": self.color_grade,
+            "maroon_intensity": self.maroon_slider.get() if hasattr(self, "maroon_slider") else 35,
+            "purple_intensity": self.purple_slider.get() if hasattr(self, "purple_slider") else 35,
+            "filter_intensity": self.filter_intensity_slider.get() if hasattr(self, "filter_intensity_slider") else 50,
+            "saturation": self.sat_slider.get() if hasattr(self, "sat_slider") else 100,
+            "contrast": self.contrast_slider.get() if hasattr(self, "contrast_slider") else 100,
+            "vignette": self.vignette_slider.get() if hasattr(self, "vignette_slider") else 0,
+            "glow": self.glow_slider.get() if hasattr(self, "glow_slider") else 0,
+            "sparkles": self.sparkle_slider.get() if hasattr(self, "sparkle_slider") else 0,
+        }
+
     # ── actions ────────────────────────────────────────────────────────
 
     def _do_crop(self):
@@ -1620,19 +1633,6 @@ class CropperApp:
             cw, ch = int(self.crop_w), int(self.crop_h)
             grade_label = f" [{self.color_grade}]" if self.color_grade != "none" else ""
             print(f"  ✅ Cropped to {cw}×{ch}{grade_label} → {self.image_path}")
-
-    def _get_color_config(self):
-        return {
-            "color_grade": self.color_grade,
-            "maroon_intensity": self.maroon_slider.get() if hasattr(self, "maroon_slider") else 35,
-            "purple_intensity": self.purple_slider.get() if hasattr(self, "purple_slider") else 35,
-            "filter_intensity": self.filter_intensity_slider.get() if hasattr(self, "filter_intensity_slider") else 50,
-            "saturation": self.sat_slider.get() if hasattr(self, "sat_slider") else 100,
-            "contrast": self.contrast_slider.get() if hasattr(self, "contrast_slider") else 100,
-            "vignette": self.vignette_slider.get() if hasattr(self, "vignette_slider") else 0,
-            "glow": self.glow_slider.get() if hasattr(self, "glow_slider") else 0,
-            "sparkles": self.sparkle_slider.get() if hasattr(self, "sparkle_slider") else 0,
-        }
 
         # Save crop information to a metadata file for video frame cropping
         import json
