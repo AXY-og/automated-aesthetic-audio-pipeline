@@ -4,6 +4,7 @@ import os
 import shutil
 import re
 import numpy as np
+import json
 import pyrubberband as pyrb
 import yt_dlp
 from pedalboard import Pedalboard, Reverb
@@ -153,6 +154,30 @@ def find_file(directory, extensions):
         if matches:
             return matches[0]
     return None
+
+
+STORED_LINKS_PATH = os.path.join(INPUT_DIR, "stored_links.json")
+
+def load_stored_links():
+    if os.path.exists(STORED_LINKS_PATH):
+        try:
+            with open(STORED_LINKS_PATH, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"  ⚠️ Error loading stored links: {e}")
+    return {"youtube_url": "", "pinterest_url": ""}
+
+def save_stored_link(key, value):
+    links = load_stored_links()
+    links[key] = value
+    try:
+        dir_name = os.path.dirname(STORED_LINKS_PATH)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        with open(STORED_LINKS_PATH, "w") as f:
+            json.dump(links, f, indent=2)
+    except Exception as e:
+        print(f"  ⚠️ Error saving stored links: {e}")
 
 
 def prompt_float(label, default):
@@ -614,7 +639,31 @@ def main(skip_effects=False, interactive_only=False):
     source_url = None
 
     # ── Audio source ──
-    url = input("\nYouTube URL (or press Enter to use local file): ").strip()
+    stored = load_stored_links()
+    stored_yt = stored.get("youtube_url", "")
+    
+    prompt = "\nYouTube URL "
+    if stored_yt:
+        prompt += f"[Default: {stored_yt}] "
+    prompt += "(type 'local' to use local file, or press Enter for default): "
+    
+    url = input(prompt).strip()
+    
+    if not url:  # Enter
+        if stored_yt:
+            url = stored_yt
+            print(f"  ↳ Using stored YouTube URL: {url}")
+        else:
+            url = ""
+            print("  ↳ No stored URL. Using local file...")
+    elif url.lower() == "local":
+        url = ""
+        print("  ↳ Bypassing stored link to use local file.")
+    else:
+        # New link entered
+        save_stored_link("youtube_url", url)
+        print(f"  ↳ Stored new YouTube URL: {url}")
+
     if url:
         source_url = url
         yt_meta = {}
@@ -693,8 +742,31 @@ def main(skip_effects=False, interactive_only=False):
         }
 
     # ── Resolve and crop center media ──
-    pinterest_url = input("\nPinterest Pin URL (or press Enter to use local file): ").strip()
-    if pinterest_url:
+    stored = load_stored_links()
+    stored_pin = stored.get("pinterest_url", "")
+    
+    prompt = "\nPinterest Pin URL "
+    if stored_pin:
+        prompt += f"[Default: {stored_pin}] "
+    prompt += "(type 'local' to use local file, or press Enter for default): "
+    
+    pinterest_url = input(prompt).strip()
+    
+    if not pinterest_url:  # Enter
+        if stored_pin:
+            pinterest_url = stored_pin
+            print(f"  ↳ Using stored Pinterest URL: {pinterest_url}")
+            download_pinterest_media(pinterest_url)
+        else:
+            pinterest_url = ""
+            print("  ↳ No stored URL. Using local file...")
+    elif pinterest_url.lower() == "local":
+        pinterest_url = ""
+        print("  ↳ Bypassing stored link to use local file.")
+    else:
+        # New link entered
+        save_stored_link("pinterest_url", pinterest_url)
+        print(f"  ↳ Stored new Pinterest URL: {pinterest_url}")
         download_pinterest_media(pinterest_url)
 
     print("\n[Step 1] Resolving center media...")
