@@ -513,6 +513,14 @@ def render_with_tweaking_loop(image_path, audio_path, output_path, profile, sour
                 continue
                 
             crop_target = cfg["center_image"]
+            
+            # Restore the original uncropped image from backup if it exists
+            backup_path = crop_target + ".original_backup.png"
+            if os.path.exists(backup_path):
+                import shutil
+                shutil.copy2(backup_path, crop_target)
+                print(f"  ↳ Restored original uncropped image for tweaking: {os.path.basename(crop_target)}")
+            
             print(f"\n  Opening cropper GUI on: {os.path.basename(crop_target)}")
             
             # Open cropper on target image
@@ -743,9 +751,27 @@ def main(skip_effects=False, interactive_only=False):
         first_frame_path = os.path.join(INPUT_DIR, "_center_first_frame.png")
         first_frame.save(first_frame_path, "PNG")
         
+        # Save a backup of the original uncropped first frame
+        first_frame_backup_path = first_frame_path + ".original_backup.png"
+        if os.path.exists(first_frame_backup_path):
+            try:
+                os.unlink(first_frame_backup_path)
+            except Exception:
+                pass
+        shutil.copy2(first_frame_path, first_frame_backup_path)
+        
         print("\nOpening cropper on video first frame to select custom crop/remove black bars...")
         cropped_first_frame = crop_to_square(first_frame_path)
     elif not used_auto_thumbnail:
+        # Save a backup of the original uncropped static image
+        static_backup_path = image + ".original_backup.png"
+        if os.path.exists(static_backup_path):
+            try:
+                os.unlink(static_backup_path)
+            except Exception:
+                pass
+        shutil.copy2(image, static_backup_path)
+        
         print("\nOpening image cropper (crop to 1:1)...")
         image = crop_to_square(image)
     else:
@@ -889,11 +915,12 @@ def main(skip_effects=False, interactive_only=False):
 
     if os.path.exists(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
-
-    # Clean up first frame temp files if they exist
+    # Clean up first frame temp files and backups if they exist
     for f in [
         os.path.join(INPUT_DIR, "_center_first_frame.png"),
-        os.path.join(INPUT_DIR, "_center_first_frame.png.crop.json")
+        os.path.join(INPUT_DIR, "_center_first_frame.png.crop.json"),
+        os.path.join(INPUT_DIR, "_center_first_frame.png.original_backup.png"),
+        image + ".original_backup.png"
     ]:
         if os.path.exists(f):
             try:
@@ -965,10 +992,12 @@ def execute_task(task_config):
     if os.path.exists(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
 
-    # Clean up first frame temp files if they exist
+    # Clean up first frame temp files and backups if they exist
     for f in [
         os.path.join(INPUT_DIR, "_center_first_frame.png"),
-        os.path.join(INPUT_DIR, "_center_first_frame.png.crop.json")
+        os.path.join(INPUT_DIR, "_center_first_frame.png.crop.json"),
+        os.path.join(INPUT_DIR, "_center_first_frame.png.original_backup.png"),
+        image + ".original_backup.png"
     ]:
         if os.path.exists(f):
             try:
