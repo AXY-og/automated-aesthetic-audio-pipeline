@@ -166,11 +166,33 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
     bg_oversized = create_blurred_bg(center_image_path, width=oversize_w, height=oversize_h, darken=1.0)
     bg_oversized = bg_oversized.convert("RGB")
 
+    # Pre-calculate grayscale background and black frame once to optimize CPU blend calls in loop
+    bg_oversized_gray = bg_oversized.convert("L").convert("RGB")
+    black_frame = Image.new("RGB", (1920, 1080), 0)
+
     # 4. Configure FFmpeg subprocess
     tw = profile["width"]
     th = profile["height"]
     vf = f"scale={tw}:{th}"
     
+    # Check if we can use Apple hardware acceleration on macOS
+    import platform
+    if platform.system() == "Darwin":
+        print("  ↳ Using hardware-accelerated H.264 VideoToolbox encoder")
+        vcodec = "h264_videotoolbox"
+        codec_args = [
+            "-c:v", vcodec,
+            "-b:v", profile["bitrate"],
+        ]
+    else:
+        vcodec = "libx264"
+        codec_args = [
+            "-c:v", vcodec, "-preset", "ultrafast", "-tune", "stillimage",
+            "-b:v", profile["bitrate"],
+            "-maxrate", profile["maxrate"],
+            "-bufsize", profile["bufsize"],
+        ]
+
     cmd = [
         "ffmpeg", "-y",
         "-f", "rawvideo",
@@ -178,14 +200,13 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
         "-pix_fmt", "rgb24",
         "-s", "1920x1080",
         "-r", str(fps),
-        "-i", "-", # stdin
-        "-i", audio_path,
-        "-vf", f"format=yuv420p,{vf}",
-        "-af", "alimiter=level_in=1:level_out=0.9:limit=0.9:attack=5:release=50",
-        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
-        "-b:v", profile["bitrate"],
-        "-maxrate", profile["maxrate"],
-        "-bufsize", profile["bufsize"],
+        "-i", "-", # Input 0 (stdin)
+        "-i", audio_path, # Input 1
+        "-i", overlay_image_path, # Input 2
+        "-filter_complex", f"[0:v][2:v]overlay=0:0,format=yuv420p,{vf}[outv]",
+        "-map", "[outv]",
+        "-map", "1:a",
+    ] + codec_args + [
         "-c:a", "aac", "-b:a", "192k",
         "-pix_fmt", "yuv420p",
         "-shortest",
@@ -232,23 +253,19 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
             
             # Crop and resize back to target viewport (1920x1080)
             frame = bg_oversized.crop((int(x0), int(y0), int(x1), int(y1)))
-            frame = frame.resize((1920, 1080), Image.Resampling.BILINEAR)
+            frame = frame.resize((1920, 1080), Image.Resampling.NEAREST)
             
-            # Apply color adjustments
+            # Apply color adjustments using pre-calculated frames and fast Image.blend
             if brightness != 1.0:
-                frame = ImageEnhance.Brightness(frame).enhance(brightness)
-            if saturation != 1.0:
-                frame = ImageEnhance.Color(frame).enhance(saturation)
+                frame = Image.blend(frame, black_frame, 1.0 - brightness)
                 
-            # Composite transparent overlay (center image, glow, shadow, text, vignette)
-            frame_rgba = frame.convert("RGBA")
-            frame_rgba.paste(overlay, (0, 0), overlay)
-            
-            # Convert back to raw RGB bytes
-            rgb_frame = frame_rgba.convert("RGB")
-            
-            # Write to FFmpeg stdin pipe
-            proc.stdin.write(rgb_frame.tobytes())
+            if saturation != 1.0:
+                frame_gray = bg_oversized_gray.crop((int(x0), int(y0), int(x1), int(y1)))
+                frame_gray = frame_gray.resize((1920, 1080), Image.Resampling.NEAREST)
+                frame = Image.blend(frame_gray, frame, saturation)
+                
+            # Write to FFmpeg stdin pipe (overlay composite is handled by FFmpeg in C)
+            proc.stdin.write(frame.tobytes())
             
             # Progress update every 100 frames
             if n % 100 == 0 or n == total_frames - 1:

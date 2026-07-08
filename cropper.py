@@ -53,7 +53,7 @@ class CropperApp:
         self.rotation = 0                      # cumulative degrees (0/90/180/270)
         self.aspect_ratio_mode = default_mode  # "1:1" | "16:9"
         self.color_grade = "none"              # filter key string
-        self.bg_mode = "none"                     # "none" | "blur" | "solid"
+        self.bg_mode = "blur"                     # "none" | "blur" | "solid"
         self.bg_color = (30, 30, 30)             # default solid bg color (dark grey)
 
         self._update_working_image()           # sets self.working, img_w, img_h
@@ -184,7 +184,7 @@ class CropperApp:
         tk.Frame(self.bar, width=12, bg="#16213e").pack(side=tk.LEFT)
 
         # Checkbutton for 16:9 Blurred BG
-        self.blur_bg_var = tk.IntVar(value=0)
+        self.blur_bg_var = tk.IntVar(value=1)
         self.chk_blur_bg = tk.Checkbutton(
             self.bar, text="16:9 Output", variable=self.blur_bg_var,
             command=self._on_toggle_blur_bg,
