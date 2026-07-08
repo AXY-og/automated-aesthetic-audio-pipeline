@@ -25,3 +25,4 @@ trend_finder/*.db
 trend_finder/reports/
 trend_finder/__pycache__/
 failed.txt
+stored_links.json

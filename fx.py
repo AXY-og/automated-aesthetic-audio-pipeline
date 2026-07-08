@@ -477,11 +477,12 @@ def combine(image_path, audio_path, output_path, profile, youtube_url=None, exis
 
 
 def render_with_tweaking_loop(image_path, audio_path, output_path, profile, source_url, 
-                              existing_thumb_path, use_motion, test_mode, title, artist):
+                              existing_thumb_path, use_motion, test_mode, title, artist,
+                              raw_audio_path=None, effects=None, settings=None):
     """
     Unified rendering function that always renders a 15-second test video first,
     opens it automatically for review, and lets the user tweak background/filters in the GUI
-    before generating the final output.
+    and audio effects in the console before generating the final output.
     """
     import os
     import json
@@ -515,7 +516,10 @@ def render_with_tweaking_loop(image_path, audio_path, output_path, profile, sour
         print("  1) Satisfied / Continue [Default]")
         print("  2) Tweak colors, background, or text in cropper GUI")
         print("  3) Re-play the test video")
-        choice = input("Enter 1, 2, or 3 [default 1]: ").strip()
+        if raw_audio_path:
+            print("  4) Tweak audio effects (slow, reverb, 8d settings)")
+            
+        choice = input("Enter 1, 2, 3, or 4 [default 1]: ").strip()
         
         if not choice or choice == "1":
             break
@@ -571,22 +575,110 @@ def render_with_tweaking_loop(image_path, audio_path, output_path, profile, sour
             
             # Auto-open the updated test video
             open_file(test_output_path)
+            
+        elif choice == "4" and raw_audio_path:
+            print("\nAvailable effects: s: slow, r: reverb, 8: 8d")
+            raw = input("Which effects? (e.g. sr8, rs, or Enter for all): ").strip().lower()
+            if not raw:
+                effects = ["slow", "reverb", "8d"]
+            else:
+                effects = []
+                if "s" in raw:
+                    effects.append("slow")
+                if "r" in raw:
+                    effects.append("reverb")
+                if "8" in raw:
+                    effects.append("8d")
+
+            print(f"\nApplying: {', '.join(effects)}")
+            settings = {}
+
+            if "slow" in effects:
+                print("\n[Slow]")
+                settings["slow"] = {
+                    "speed": prompt_float("Speed 0.0-1.0", 0.85)
+                }
+
+            if "reverb" in effects:
+                print("\n[Reverb]")
+                settings["reverb"] = {
+                    "room_size": prompt_float("Room size 0.0-1.0", 0.75),
+                    "damping":   prompt_float("Damping   0.0-1.0", 0.50),
+                    "wet_level": prompt_float("Wet level 0.0-1.0", 0.25),
+                    "dry_level": prompt_float("Dry level 0.0-1.0", 0.70),
+                }
+
+            if "8d" in effects:
+                print("\n[8D]")
+                settings["8d"] = {
+                    "hz": prompt_float("Pan speed Hz", 0.125)
+                }
+
+            # Run processing chain
+            print("\nRe-processing audio effects...")
+            current_tweak = raw_audio_path
+            step_tweak = 100
+            
+            # Clean up old tweaked files if any
+            import glob
+            for f in glob.glob(os.path.join(TEMP_DIR, "tweak_*.wav")):
+                try:
+                    os.unlink(f)
+                except Exception:
+                    pass
+
+            if "slow" in effects:
+                print("Applying slow...")
+                out = os.path.join(TEMP_DIR, f"tweak_{step_tweak}_slow.wav")
+                apply_slow(current_tweak, out, **settings["slow"])
+                current_tweak, step_tweak = out, step_tweak + 1
+
+            if "reverb" in effects:
+                print("Applying reverb...")
+                out = os.path.join(TEMP_DIR, f"tweak_{step_tweak}_reverb.wav")
+                apply_reverb(current_tweak, out, **settings["reverb"])
+                current_tweak, step_tweak = out, step_tweak + 1
+
+            if "8d" in effects:
+                print("Applying 8D...")
+                out = os.path.join(TEMP_DIR, f"tweak_{step_tweak}_8d.wav")
+                apply_8d(current_tweak, out, **settings["8d"])
+                current_tweak, step_tweak = out, step_tweak + 1
+
+            # Update audio_path variable for final rendering
+            audio_path = current_tweak
+            print("  ✅ Audio effects re-processed successfully!")
+
+            # Re-render 15s test video with updated configuration
+            print("\n  Re-rendering 15-second test video with updated tweaks...")
+            combine(image_path, audio_path, test_output_path, profile, youtube_url=source_url,
+                    existing_thumb=thumb_base if os.path.exists(thumb_base) else None, use_motion=use_motion)
+            
+            # Auto-open the updated test video
+            open_file(test_output_path)
 
     # Proceed to finalize final output path
     if test_mode == "y":
-        return test_output_path
+        final_path = test_output_path
     else:
         print(f"\n  Proceeding to render the full-length video: {os.path.basename(output_path)}")
         combine(image_path, audio_path, output_path, profile, youtube_url=source_url,
                 existing_thumb=thumb_base if os.path.exists(thumb_base) else None, use_motion=use_motion)
+        final_path = output_path
                 
-        # Clean up temporary test video file to keep directory clean
-        if os.path.exists(test_output_path):
-            try:
-                os.unlink(test_output_path)
-            except Exception:
-                pass
-        return output_path
+    # Clean up temporary test video file to keep directory clean
+    if os.path.exists(test_output_path) and test_mode != "y":
+        try:
+            os.unlink(test_output_path)
+        except Exception:
+            pass
+            
+    return {
+        "output_path": final_path,
+        "audio_path": audio_path,
+        "effects": effects,
+        "settings": settings
+    }
 
 
 def download_youtube_audio(url):
@@ -979,11 +1071,15 @@ def main(skip_effects=False, interactive_only=False):
     existing_thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
 
     print("Combining audio and image...")
-    output_path = render_with_tweaking_loop(
+    tweak_res = render_with_tweaking_loop(
         image, current, output_path, profile, source_url, 
         existing_thumb_path, use_motion, test_mode,
-        title=yt_meta.get("confirmed_song"), artist=yt_meta.get("confirmed_artist")
+        title=yt_meta.get("confirmed_song"), artist=yt_meta.get("confirmed_artist"),
+        raw_audio_path=audio, effects=effects, settings=settings
     )
+    output_path = tweak_res["output_path"]
+    effects = tweak_res["effects"]
+    settings = tweak_res["settings"]
 
     if os.path.exists(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
@@ -1055,11 +1151,15 @@ def execute_task(task_config):
         output_path = os.path.join(OUTPUT_DIR, f"{name}.mp4")
 
     print("Combining audio and image...")
-    output_path = render_with_tweaking_loop(
+    tweak_res = render_with_tweaking_loop(
         image, current, output_path, profile, source_url, 
         existing_thumb_path, use_motion, test_mode,
-        title=task_config.get("song_name"), artist=task_config.get("artist_name")
+        title=task_config.get("song_name"), artist=task_config.get("artist_name"),
+        raw_audio_path=audio, effects=effects, settings=settings
     )
+    output_path = tweak_res["output_path"]
+    effects = tweak_res["effects"]
+    settings = tweak_res["settings"]
 
     if os.path.exists(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
