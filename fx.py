@@ -21,6 +21,127 @@ def open_file(filepath):
             print(f"  ⚠️ Warning: Could not auto-open test video: {e}")
 
 
+def download_pinterest_media(url):
+    """
+    Download a Pinterest image or video from a pin URL.
+    Supports pin.it short links and standard pinterest.com/pin/ URLs.
+    Downloads the high-resolution original image/video into INPUT_DIR.
+    """
+    import urllib.request
+    import urllib.parse
+    import json
+    
+    print(f"\n[Pinterest] Downloading media from URL: {url}")
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+    }
+    
+    # Resolve redirect if pin.it
+    if "pin.it" in url or "/pin/" not in url:
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                url = response.geturl()
+                print(f"  ↳ Resolved short URL to: {url}")
+        except Exception as e:
+            print(f"  ⚠️ Redirect resolution failed: {e}")
+            
+    # Download HTML
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html = response.read().decode('utf-8', errors='replace')
+    except Exception as e:
+        print(f"  ❌ Failed to download Pinterest page HTML: {e}")
+        return None
+
+    # Search for all application/json script tags
+    script_matches = re.finditer(r'<script([^>]*)>(.*?)</script>', html, re.DOTALL)
+    
+    image_urls = set()
+    video_urls = set()
+    
+    def find_urls_recursive(val):
+        if isinstance(val, str):
+            if "i.pinimg.com/originals/" in val:
+                image_urls.add(val)
+            elif ".mp4" in val or "/videos/" in val or "/v/" in val:
+                if val.startswith("http"):
+                    video_urls.add(val)
+        elif isinstance(val, dict):
+            for v in val.values():
+                find_urls_recursive(v)
+        elif isinstance(val, list):
+            for v in val:
+                find_urls_recursive(v)
+
+    # Try to load and parse JSON from script tags
+    for m in script_matches:
+        attrs = m.group(1)
+        content = m.group(2)
+        if "application/json" in attrs or "initialReduxState" in content or "__PWS_INITIAL_PROPS__" in attrs:
+            try:
+                data = json.loads(content)
+                find_urls_recursive(data)
+            except Exception:
+                pass
+
+    # If JSON parsing did not find any media, use regex fallback on raw HTML
+    if not image_urls and not video_urls:
+        originals = re.findall(r'https://i\.pinimg\.com/originals/[a-zA-Z0-9_/.-]+', html)
+        for orig in originals:
+            image_urls.add(orig)
+            
+        mp4s = re.findall(r'https?://[a-zA-Z0-9_/.-]+\.mp4[a-zA-Z0-9_/?=.-]*', html)
+        for mp4 in mp4s:
+            video_urls.add(mp4)
+
+    # Resolve selection
+    chosen_url = None
+    is_video = False
+    
+    if video_urls:
+        # Prioritize 720p or mp4 video files
+        sorted_videos = sorted(list(video_urls), key=lambda x: ("720p" in x or "720" in x or "v720p" in x), reverse=True)
+        chosen_url = sorted_videos[0]
+        is_video = True
+        print(f"  ↳ Selected video URL: {chosen_url}")
+    elif image_urls:
+        chosen_url = list(image_urls)[0]
+        print(f"  ↳ Selected original image URL: {chosen_url}")
+        
+    if not chosen_url:
+        print("  ❌ No images or videos could be extracted from Pinterest page.")
+        return None
+
+    # Download file
+    ext = os.path.splitext(urllib.parse.urlparse(chosen_url).path)[1]
+    if not ext:
+        ext = ".mp4" if is_video else ".png"
+    
+    # Save into INPUT_DIR
+    filepath = os.path.join(INPUT_DIR, f"pinterest_download{ext}")
+    
+    # Remove existing download if any
+    if os.path.exists(filepath):
+        try:
+            os.unlink(filepath)
+        except Exception:
+            pass
+            
+    req = urllib.request.Request(chosen_url, headers=headers)
+    try:
+        print(f"  ↳ Downloading to {filepath}...")
+        with urllib.request.urlopen(req, timeout=30) as response, open(filepath, 'wb') as out_file:
+            out_file.write(response.read())
+        print(f"  ✅ Download complete: {os.path.basename(filepath)}")
+        return filepath
+    except Exception as e:
+        print(f"  ❌ Failed to download file: {e}")
+        return None
+
+
 INPUT_DIR = "input"
 OUTPUT_DIR = "output"
 TEMP_DIR = "temp"
@@ -564,6 +685,10 @@ def main(skip_effects=False, interactive_only=False):
         }
 
     # ── Resolve and crop center media ──
+    pinterest_url = input("\nPinterest Pin URL (or press Enter to use local file): ").strip()
+    if pinterest_url:
+        download_pinterest_media(pinterest_url)
+
     print("\n[Step 1] Resolving center media...")
     is_video_center = False
     used_auto_thumbnail = False
