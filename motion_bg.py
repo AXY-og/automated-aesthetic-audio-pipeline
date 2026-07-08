@@ -12,6 +12,217 @@ from PIL import Image, ImageEnhance
 import tempfile
 
 
+def apply_color_adjustments_to_frame(img, color_adj):
+    if not color_adj:
+        return img
+        
+    from PIL import Image, ImageEnhance, ImageFilter
+    import random
+    
+    color_grade = color_adj.get("color_grade", "none")
+    maroon_intensity = color_adj.get("maroon_intensity", 35)
+    purple_intensity = color_adj.get("purple_intensity", 35)
+    filter_intensity = color_adj.get("filter_intensity", 50)
+    saturation = color_adj.get("saturation", 100)
+    contrast = color_adj.get("contrast", 100)
+    vignette = color_adj.get("vignette", 0)
+    glow = color_adj.get("glow", 0)
+    sparkles = color_adj.get("sparkles", 0)
+    
+    # ── Helpers ──
+    def _apply_curves(image, r_curve=None, g_curve=None, b_curve=None):
+        r, g, b = image.split()
+        if r_curve:
+            r = r.point(r_curve)
+        if g_curve:
+            g = g.point(g_curve)
+        if b_curve:
+            b = b.point(b_curve)
+        return Image.merge("RGB", (r, g, b))
+        
+    def _add_vignette(image, strength=0.6):
+        w, h = image.size
+        cx, cy = w / 2.0, h / 2.0
+        y_coords = np.arange(h, dtype=np.float64)
+        x_coords = np.arange(w, dtype=np.float64)
+        yy, xx = np.meshgrid(y_coords, x_coords, indexing='ij')
+        dx = (xx - cx) / cx
+        dy = (yy - cy) / cy
+        dist = np.sqrt(dx ** 2 + dy ** 2)
+        max_d = dist.max()
+        if max_d > 0:
+            dist = dist / max_d
+        threshold = 0.55
+        falloff = np.clip((dist - threshold) / (1.0 - threshold), 0.0, 1.0)
+        falloff = falloff ** 3.0
+        vignette_alpha = np.clip(falloff * strength * 255, 0, 255).astype(np.uint8)
+        mask = Image.fromarray(vignette_alpha, mode="L")
+        blur_radius = max(8, int(min(w, h) * 0.05))
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        dark = Image.new("RGB", (w, h), (0, 0, 0))
+        return Image.composite(dark, image, mask)
+        
+    def _add_glow(image, amount=0.0):
+        if amount <= 0:
+            return image
+        w, h = image.size
+        blur_radius = max(1, int(amount * 35 * (w / 1000.0)))
+        blurred = image.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        bright_blurred = ImageEnhance.Brightness(blurred).enhance(1.25)
+        return Image.blend(image, bright_blurred, alpha=amount * 0.45)
+        
+    def _add_sparkles(image, intensity=0.0):
+        if intensity <= 0:
+            return image
+        from PIL import ImageDraw
+        gray = image.convert("L")
+        w, h = image.size
+        arr = np.array(gray)
+        threshold = int(248 - intensity * 15)
+        y_indices, x_indices = np.where(arr >= threshold)
+        if len(x_indices) == 0:
+            return image
+        candidates = list(zip(x_indices, y_indices))
+        # Keep deterministic subset to avoid flickering sparkles across frames
+        candidates = candidates[:int(10 + intensity * 45)]
+        
+        result = image.copy()
+        draw = ImageDraw.Draw(result, "RGBA")
+        base_size = int(15 + intensity * 25 * (w / 1000.0))
+        for cx, cy in candidates:
+            try:
+                original_pixel = image.getpixel((cx, cy))
+            except Exception:
+                continue
+            r = min(255, int(original_pixel[0] * 0.2 + 255 * 0.8))
+            g = min(255, int(original_pixel[1] * 0.2 + 255 * 0.8))
+            b = min(255, int(original_pixel[2] * 0.2 + 255 * 0.8))
+            glint_size = int(base_size)
+            if glint_size <= 0:
+                continue
+            core_r = max(2, glint_size // 6)
+            draw.ellipse([cx - core_r, cy - core_r, cx + core_r, cy + core_r], fill=(255, 255, 255, 255))
+            for offset in range(1, glint_size):
+                alpha = int(255 * (1.0 - offset / float(glint_size)) ** 1.8)
+                if alpha <= 0:
+                    continue
+                thickness = max(1, (glint_size - offset) // 8)
+                draw.line([(cx - offset, cy), (cx + offset, cy)], fill=(r, g, b, alpha), width=thickness)
+                draw.line([(cx, cy - offset), (cx, cy + offset)], fill=(r, g, b, alpha), width=thickness)
+        return result
+
+    # 1. Apply preset color filter
+    t = filter_intensity / 100.0
+    
+    if color_grade == "bw":
+        img = img.convert("L").convert("RGB")
+    elif color_grade == "maroon":
+        alpha = maroon_intensity / 100.0 * 0.6
+        overlay = Image.new("RGB", img.size, (100, 10, 20))
+        blended = Image.blend(img, overlay, alpha=max(0.0, min(alpha, 1.0)))
+        img = ImageEnhance.Contrast(blended).enhance(1.15)
+    elif color_grade == "purple":
+        alpha = purple_intensity / 100.0 * 0.6
+        overlay = Image.new("RGB", img.size, (80, 20, 120))
+        blended = Image.blend(img, overlay, alpha=max(0.0, min(alpha, 1.0)))
+        img = ImageEnhance.Contrast(blended).enhance(1.15)
+    elif color_grade == "grain":
+        img = ImageEnhance.Color(img).enhance(0.85 + t * 0.1)
+        img = ImageEnhance.Contrast(img).enhance(1.05 + t * 0.1)
+    elif color_grade == "faded":
+        fade_floor = int(20 + t * 40)
+        lut = [int(fade_floor + (255 - fade_floor) * (i / 255.0)) for i in range(256)]
+        img = _apply_curves(img, lut, lut, lut)
+        img = ImageEnhance.Color(img).enhance(0.55 + (1 - t) * 0.3)
+        img = ImageEnhance.Contrast(img).enhance(0.85)
+    elif color_grade == "golden":
+        alpha = t * 0.3
+        warm_overlay = Image.new("RGB", img.size, (255, 180, 80))
+        blended = Image.blend(img, warm_overlay, alpha=max(0.0, min(alpha, 1.0)))
+        img = ImageEnhance.Color(blended).enhance(1.15 + t * 0.2)
+        img = ImageEnhance.Brightness(img).enhance(1.05 + t * 0.08)
+        img = ImageEnhance.Contrast(img).enhance(1.08)
+    elif color_grade == "cool":
+        alpha = t * 0.25
+        cool_overlay = Image.new("RGB", img.size, (100, 140, 200))
+        blended = Image.blend(img, cool_overlay, alpha=max(0.0, min(alpha, 1.0)))
+        img = ImageEnhance.Color(blended).enhance(0.75 + (1 - t) * 0.2)
+        img = ImageEnhance.Contrast(img).enhance(1.1)
+    elif color_grade == "sepia":
+        grey = img.convert("L")
+        sepia_r = grey.point(lambda p: min(255, int(p * (1.0 + 0.30 * t))))
+        sepia_g = grey.point(lambda p: min(255, int(p * (1.0 + 0.05 * t))))
+        sepia_b = grey.point(lambda p: max(0,   int(p * (1.0 - 0.20 * t))))
+        sepia = Image.merge("RGB", (sepia_r, sepia_g, sepia_b))
+        blended = Image.blend(img, sepia, alpha=0.4 + t * 0.4)
+        img = ImageEnhance.Contrast(blended).enhance(1.05)
+    elif color_grade == "matte":
+        fade_floor = int(30 + t * 35)
+        ceiling = int(245 - t * 15)
+        lut = [int(fade_floor + (ceiling - fade_floor) * (i / 255.0)) for i in range(256)]
+        blended = _apply_curves(img, lut, lut, lut)
+        blended = ImageEnhance.Color(blended).enhance(0.7 + (1 - t) * 0.2)
+        blended = ImageEnhance.Contrast(blended).enhance(0.9)
+        warm = Image.new("RGB", blended.size, (240, 220, 200))
+        img = Image.blend(blended, warm, alpha=t * 0.08)
+    elif color_grade == "softpink":
+        alpha = t * 0.2
+        pink_overlay = Image.new("RGB", img.size, (255, 180, 200))
+        blended = Image.blend(img, pink_overlay, alpha=max(0.0, min(alpha, 1.0)))
+        img = ImageEnhance.Brightness(blended).enhance(1.08 + t * 0.06)
+        img = ImageEnhance.Color(img).enhance(0.85 + t * 0.1)
+        img = ImageEnhance.Contrast(img).enhance(0.95)
+    elif color_grade == "teal":
+        r_lut = [min(255, max(0, int(i * (0.9 + t * 0.15) + t * 10))) for i in range(256)]
+        g_lut = [min(255, max(0, int(i * (0.95 + t * 0.05) + t * 5))) for i in range(256)]
+        b_lut = [min(255, max(0, int(i * (1.0 + t * 0.08) + t * 15))) for i in range(256)]
+        blended = _apply_curves(img, r_lut, g_lut, b_lut)
+        img = ImageEnhance.Contrast(blended).enhance(1.15 + t * 0.1)
+        img = ImageEnhance.Color(img).enhance(0.8 + t * 0.15)
+    elif color_grade == "analog":
+        r_lut = [min(255, max(0, int(i * (1.0 + t * 0.12)))) for i in range(256)]
+        g_lut = [min(255, max(0, int(i * (1.0 + t * 0.04) - t * 5))) for i in range(256)]
+        b_lut = [min(255, max(0, int(i * (0.95 - t * 0.05)))) for i in range(256)]
+        blended = _apply_curves(img, r_lut, g_lut, b_lut)
+        fade_floor = int(t * 18)
+        if fade_floor > 0:
+            lift_lut = [max(fade_floor, i) for i in range(256)]
+            blended = _apply_curves(blended, lift_lut, lift_lut, lift_lut)
+        img = ImageEnhance.Color(blended).enhance(1.1 + t * 0.15)
+        img = ImageEnhance.Contrast(blended).enhance(1.08)
+    elif color_grade == "cinema":
+        shadow_lut = [max(0, int(i * (1.0 - t * 0.15))) for i in range(256)]
+        blended = _apply_curves(img, shadow_lut, shadow_lut, shadow_lut)
+        r_lut = [min(255, max(0, int(i + (i / 255.0) * t * 15 - (1 - i / 255.0) * t * 8))) for i in range(256)]
+        g_lut = list(range(256))
+        b_lut = [min(255, max(0, int(i - (i / 255.0) * t * 10 + (1 - i / 255.0) * t * 12))) for i in range(256)]
+        blended = _apply_curves(blended, r_lut, g_lut, b_lut)
+        img = ImageEnhance.Color(blended).enhance(0.7 + (1 - t) * 0.2)
+        img = ImageEnhance.Contrast(blended).enhance(1.2 + t * 0.15)
+
+    # 2. Saturation Slider
+    if saturation != 100:
+        img = ImageEnhance.Color(img).enhance(saturation / 100.0)
+        
+    # 3. Contrast Slider
+    if contrast != 100:
+        img = ImageEnhance.Contrast(img).enhance(contrast / 100.0)
+        
+    # 4. Glow Slider
+    if glow > 0:
+        img = _add_glow(img, glow / 100.0)
+        
+    # 5. Vignette Slider
+    if vignette > 0:
+        img = _add_vignette(img, vignette / 100.0 * 0.85)
+        
+    # 6. Sparkles Slider
+    if sparkles > 0:
+        img = _add_sparkles(img, sparkles / 100.0)
+        
+    return img
+
+
 def extract_center_video_frames(video_path, target_size=660, fps=30, crop_info=None):
     """Extract all frames from a video/GIF, square-crop (or use crop_info), and resize to target_size.
 
@@ -31,6 +242,22 @@ def extract_center_video_frames(video_path, target_size=660, fps=30, crop_info=N
             x2 = crop_info.get("x2", frame.width)
             y2 = crop_info.get("y2", frame.height)
             frame = frame.crop((x1, y1, x2, y2))
+            
+            # Apply color grading and slider adjustments!
+            color_adj = crop_info.get("color_adjustments")
+            if color_adj:
+                # convert RGBA to RGB for processing
+                alpha = None
+                if frame.mode == "RGBA":
+                    r, g, b, alpha = frame.split()
+                    frame = Image.merge("RGB", (r, g, b))
+                
+                frame = apply_color_adjustments_to_frame(frame, color_adj)
+                
+                # put alpha back if it existed
+                if alpha:
+                    frame = frame.convert("RGBA")
+                    frame.putalpha(alpha)
         else:
             w, h = frame.size
             min_dim = min(w, h)
