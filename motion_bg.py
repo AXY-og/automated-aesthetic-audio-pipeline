@@ -9,6 +9,74 @@ import soundfile as sf
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import butter, sosfilt
 from PIL import Image, ImageEnhance
+import tempfile
+
+
+def extract_center_video_frames(video_path, target_size=660, fps=30):
+    """Extract all frames from a video/GIF, square-crop, and resize to target_size.
+
+    Returns a list of PIL RGBA Images ready to be pasted at the center position.
+    Uses FFmpeg to extract frames at the target fps. For GIFs, uses PIL directly.
+    """
+    ext = os.path.splitext(video_path)[1].lower()
+
+    if ext == ".gif":
+        # Use PIL to extract GIF frames natively
+        frames = []
+        gif = Image.open(video_path)
+        try:
+            while True:
+                frame = gif.copy().convert("RGBA")
+                # Square crop from center
+                w, h = frame.size
+                min_dim = min(w, h)
+                left = (w - min_dim) // 2
+                top = (h - min_dim) // 2
+                frame = frame.crop((left, top, left + min_dim, top + min_dim))
+                frame = frame.resize((target_size, target_size), Image.Resampling.LANCZOS)
+                frames.append(frame)
+                gif.seek(gif.tell() + 1)
+        except EOFError:
+            pass
+        print(f"  ↳ Extracted {len(frames)} frames from GIF")
+        return frames
+
+    # For video files, use FFmpeg to dump frames to a temp directory
+    tmp_dir = tempfile.mkdtemp(prefix="xenia_frames_")
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vf", f"fps={fps}",
+            "-q:v", "2",
+            os.path.join(tmp_dir, "frame_%05d.png")
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
+
+        # Load all frames
+        frame_files = sorted([
+            f for f in os.listdir(tmp_dir)
+            if f.startswith("frame_") and f.endswith(".png")
+        ])
+
+        frames = []
+        for fname in frame_files:
+            frame = Image.open(os.path.join(tmp_dir, fname)).convert("RGBA")
+            # Square crop from center
+            w, h = frame.size
+            min_dim = min(w, h)
+            left = (w - min_dim) // 2
+            top = (h - min_dim) // 2
+            frame = frame.crop((left, top, left + min_dim, top + min_dim))
+            frame = frame.resize((target_size, target_size), Image.Resampling.LANCZOS)
+            frames.append(frame)
+
+        print(f"  ↳ Extracted {len(frames)} frames from video at {fps}fps")
+        return frames
+    finally:
+        # Clean up temp directory
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 def analyze_audio(audio_path, fps=30):
     """
@@ -121,6 +189,9 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
     """
     Generate dynamic background motion, composite the pre-rendered overlay on top,
     and stream directly to FFmpeg.
+    
+    Supports both static center images (fast FFmpeg overlay path) and animated
+    center videos/GIFs (per-frame Python compositing with looping).
     """
     print(f"\n[Motion BG] Starting rhythmic video generation...")
     
@@ -133,13 +204,37 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
         
     center_image_path = config["center_image"]
     overlay_image_path = config["overlay_image"]
+    center_video_path = config.get("center_video")  # None for static images
+    overlay_no_center_path = config.get("overlay_no_center")  # None for static images
     
     if not os.path.exists(center_image_path):
         raise FileNotFoundError(f"Center image not found: {center_image_path}")
     if not os.path.exists(overlay_image_path):
         raise FileNotFoundError(f"Overlay image not found: {overlay_image_path}")
 
-    # Load static transparent overlay
+    # Determine if we're in video center mode
+    use_video_center = (
+        center_video_path is not None
+        and os.path.exists(center_video_path)
+        and overlay_no_center_path is not None
+        and os.path.exists(overlay_no_center_path)
+    )
+
+    if use_video_center:
+        print(f"  ↳ Video center mode: {os.path.basename(center_video_path)}")
+        print(f"  ↳ Pre-extracting center video frames...")
+        center_frames = extract_center_video_frames(center_video_path, target_size=660, fps=fps)
+        if not center_frames:
+            print("  ⚠️ No frames extracted from center video. Falling back to static mode.")
+            use_video_center = False
+        else:
+            # Load the no-center overlay (has text, glow, shadow, vignette but NOT center image)
+            overlay_nc = Image.open(overlay_no_center_path).convert("RGBA")
+            # Pre-calculate center paste position
+            central_x = (1920 - 660) // 2
+            central_y = (1080 - 660) // 2
+
+    # Load static transparent overlay (used for static path or fallback)
     overlay = Image.open(overlay_image_path).convert("RGBA")
     
     # 2. Extract audio RMS envelope
@@ -193,6 +288,14 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
             "-bufsize", profile["bufsize"],
         ]
 
+    if use_video_center:
+        # Video center mode: overlay_no_center is composited via FFmpeg,
+        # but center frames are pasted per-frame in Python before writing to stdin
+        ffmpeg_overlay_path = overlay_no_center_path
+    else:
+        # Static center mode: full overlay (with center image baked in) via FFmpeg
+        ffmpeg_overlay_path = overlay_image_path
+
     cmd = [
         "ffmpeg", "-y",
         "-f", "rawvideo",
@@ -202,7 +305,7 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
         "-r", str(fps),
         "-i", "-", # Input 0 (stdin)
         "-i", audio_path, # Input 1
-        "-i", overlay_image_path, # Input 2
+        "-i", ffmpeg_overlay_path, # Input 2
         "-filter_complex", f"[0:v][2:v]overlay=0:0,format=yuv420p,{vf}[outv]",
         "-map", "[outv]",
         "-map", "1:a",
@@ -217,7 +320,11 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     # 5. Render loop
-    print(f"  ↳ Rendering frame sequence with motion profiles...")
+    if use_video_center:
+        num_center_frames = len(center_frames)
+        print(f"  ↳ Rendering with animated center ({num_center_frames} frames, looping)...")
+    else:
+        print(f"  ↳ Rendering frame sequence with motion profiles...")
     
     # Pre-calculate constants
     cx, cy = oversize_w / 2.0, oversize_h / 2.0
@@ -263,8 +370,13 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
                 frame_gray = bg_oversized_gray.crop((int(x0), int(y0), int(x1), int(y1)))
                 frame_gray = frame_gray.resize((1920, 1080), Image.Resampling.NEAREST)
                 frame = Image.blend(frame_gray, frame, saturation)
+
+            # If video center mode, paste the current center frame onto the background
+            if use_video_center:
+                center_frame = center_frames[n % num_center_frames]
+                frame.paste(center_frame, (central_x, central_y), center_frame)
                 
-            # Write to FFmpeg stdin pipe (overlay composite is handled by FFmpeg in C)
+            # Write to FFmpeg stdin pipe (static overlay composite is handled by FFmpeg in C)
             proc.stdin.write(frame.tobytes())
             
             # Progress update every 100 frames
@@ -293,3 +405,4 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
         
     total_time = time.time() - start_time
     print(f"  ✅ Rhythmic motion background video generated in {total_time:.1f}s!")
+

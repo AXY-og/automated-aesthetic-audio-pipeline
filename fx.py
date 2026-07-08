@@ -436,8 +436,8 @@ def main(skip_effects=False, interactive_only=False):
             import thumbnail
             name = os.path.splitext(os.path.basename(audio))[0]
             thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
-            # Look for a local image in input/ (e.g. Pinterest image)
-            local_image = find_file(INPUT_DIR, ["jpg", "jpeg", "png"])
+            # Look for a local image or video/GIF in input/ (e.g. Pinterest image or animated center)
+            local_image = find_file(INPUT_DIR, ["jpg", "jpeg", "png", "gif", "mp4", "mov", "webm"])
             
             # Generate the thumbnail (uses YouTube thumbnail as fallback if no local image is present)
             thumbnail.generate_thumbnail(
@@ -470,23 +470,32 @@ def main(skip_effects=False, interactive_only=False):
 
     used_auto_thumbnail = False
     image = find_file(INPUT_DIR, ["jpg", "jpeg", "png"])
+    is_video_center = False
+    if not image:
+        # Also look for video/GIF center media
+        image = find_file(INPUT_DIR, ["gif", "mp4", "mov", "webm", "avi", "mkv"])
+        if image:
+            is_video_center = True
+            print(f"  Found video/GIF center media: {os.path.basename(image)}")
     if not image:
         # Check if we generated a thumbnail that we can use as the video background
         name = os.path.splitext(os.path.basename(audio))[0]
         thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
         if os.path.exists(thumb_path):
-            print(f"  No Pinterest image found in input/. Using generated thumbnail as video background: {os.path.basename(thumb_path)}")
+            print(f"  No center media found in input/. Using generated thumbnail as video background: {os.path.basename(thumb_path)}")
             image = thumb_path
             used_auto_thumbnail = True
         else:
-            print("No image file found in input/")
+            print("No image or video file found in input/")
             return None
 
-    print(f"\nAudio : {os.path.basename(audio)}")
-    print(f"Image : {os.path.basename(image)}")
+    print(f"\nAudio  : {os.path.basename(audio)}")
+    print(f"Center : {os.path.basename(image)}{' (video/GIF)' if is_video_center else ''}")
 
     # ── Interactive 1:1 crop ──
-    if not used_auto_thumbnail:
+    if is_video_center:
+        print("\nCenter media is a video/GIF — skipping interactive cropper.")
+    elif not used_auto_thumbnail:
         print("\nOpening image cropper (crop to 1:1)...")
         image = crop_to_square(image)
     else:

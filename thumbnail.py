@@ -16,6 +16,53 @@ import colorsys
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance, ImageChops
 
+# Video/GIF extensions recognized as animated center media
+VIDEO_EXTENSIONS = {"mp4", "mov", "webm", "gif", "avi", "mkv"}
+IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "JPG", "JPEG", "PNG"}
+
+
+def is_video_file(path):
+    """Return True if the file extension indicates a video or GIF."""
+    ext = os.path.splitext(path)[1].lstrip(".").lower()
+    return ext in VIDEO_EXTENSIONS
+
+
+def extract_first_frame(video_path):
+    """Extract the first frame from a video or GIF and return it as a PIL Image.
+
+    Uses FFmpeg to grab frame 0 and writes it to a temp PNG file.
+    For GIFs, PIL is used directly since it handles them natively.
+    """
+    ext = os.path.splitext(video_path)[1].lower()
+
+    # PIL can natively read GIF frames
+    if ext == ".gif":
+        img = Image.open(video_path)
+        img.seek(0)
+        return img.convert("RGB")
+
+    # For video files, use FFmpeg
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-frames:v", "1",
+            "-q:v", "2",
+            tmp_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=15)
+        return Image.open(tmp_path).convert("RGB")
+    finally:
+        # Clean up temp file after loading into PIL
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
 
 def strip_features(name):
     """Remove featured artist indicators and return only the primary artist.
@@ -612,24 +659,54 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
     # Download YouTube thumbnail as fallback
     temp_art = download_thumbnail(thumb_url)
 
-    # ── Determine center image ──
-    print("\n[Step 0b] Locating center image...")
+    # ── Determine center media (image or video/GIF) ──
+    print("\n[Step 0b] Locating center media...")
     chosen_center_image = pinterest_image_path
+    center_video_path = None  # non-None when center is animated video/GIF
+
     if not chosen_center_image or not os.path.exists(chosen_center_image):
         import glob
+        # First, look for static images
         input_images = []
-        for ext in ["jpg", "jpeg", "png", "JPG", "JPEG", "PNG"]:
+        for ext in IMAGE_EXTENSIONS:
             input_images.extend(glob.glob(f"input/*.{ext}"))
         if input_images:
             chosen_center_image = input_images[0]
-            print(f"  ↳ Found Pinterest image in input/: {os.path.basename(chosen_center_image)}")
+            print(f"  ↳ Found image in input/: {os.path.basename(chosen_center_image)}")
+
+    # If no static image found, look for video/GIF files
+    if not chosen_center_image or not os.path.exists(chosen_center_image):
+        import glob
+        input_videos = []
+        for ext in VIDEO_EXTENSIONS:
+            input_videos.extend(glob.glob(f"input/*.{ext}"))
+        if input_videos:
+            center_video_path = input_videos[0]
+            print(f"  ↳ Found video/GIF center media in input/: {os.path.basename(center_video_path)}")
+            print(f"  ↳ Extracting first frame for thumbnail generation...")
+            first_frame = extract_first_frame(center_video_path)
+            # Save first frame as a temp PNG so existing code can use it
+            first_frame_path = os.path.join("input", "_center_first_frame.png")
+            first_frame.save(first_frame_path, "PNG")
+            chosen_center_image = first_frame_path
+            print(f"  ✅ First frame extracted ({first_frame.size[0]}x{first_frame.size[1]})")
+    elif chosen_center_image and is_video_file(chosen_center_image):
+        # The pinterest_image_path itself is a video/GIF
+        center_video_path = chosen_center_image
+        print(f"  ↳ Center media is a video/GIF: {os.path.basename(center_video_path)}")
+        print(f"  ↳ Extracting first frame for thumbnail generation...")
+        first_frame = extract_first_frame(center_video_path)
+        first_frame_path = os.path.join("input", "_center_first_frame.png")
+        first_frame.save(first_frame_path, "PNG")
+        chosen_center_image = first_frame_path
+        print(f"  ✅ First frame extracted ({first_frame.size[0]}x{first_frame.size[1]})")
 
     if not chosen_center_image or not os.path.exists(chosen_center_image):
         if temp_art and os.path.exists(temp_art):
-            print("  ↳ No Pinterest image found. Using downloaded YouTube thumbnail.")
+            print("  ↳ No center media found. Using downloaded YouTube thumbnail.")
             chosen_center_image = temp_art
         else:
-            raise FileNotFoundError("No Pinterest cover image found in input/ and no YouTube fallback available.")
+            raise FileNotFoundError("No center media (image or video) found in input/ and no YouTube fallback available.")
 
     try:
         pint_img = Image.open(chosen_center_image)
@@ -637,10 +714,13 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
         print(f"  ❌ Failed to open center image '{chosen_center_image}': {e}")
         raise
 
+    # For blurred background, use center_video first frame or the static image
+    bg_source_image = chosen_center_image
+
     # ── Step 1: Background ──
-    # Use blurred Pinterest image as the background (always aesthetic)
-    if chosen_center_image and os.path.exists(chosen_center_image):
-        canvas = create_blurred_bg(chosen_center_image)
+    # Use blurred center image as the background (always aesthetic)
+    if bg_source_image and os.path.exists(bg_source_image):
+        canvas = create_blurred_bg(bg_source_image)
     else:
         # Absolute fallback: flat gradient from manual hex colors
         c1, c2 = prompt_hex_colors()
@@ -755,7 +835,12 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
     glow_y = (1080 - 800) // 2
     overlay.paste(glow_img, (glow_x, glow_y), glow_img)
 
-    # Paste center cover image
+    # If center is a video, save the overlay WITHOUT the center image baked in
+    # This version will be used by motion_bg.py for per-frame compositing
+    if center_video_path:
+        overlay_no_center = overlay.copy()
+
+    # Paste center cover image (first frame for videos)
     central_rgba = central_img.convert("RGBA")
     central_x = (1920 - 660) // 2
     central_y = (1080 - 660) // 2
@@ -765,10 +850,17 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
     draw_gradient_text(overlay, title, title_font, 960, 105, title_start, title_end, anchor="mm", stroke_width=1)
     draw_gradient_text(overlay, artist, artist_font, 960, 975, artist_start, artist_end, anchor="mm", stroke_width=1)
 
+    # Also draw text onto overlay_no_center if video center
+    if center_video_path:
+        draw_gradient_text(overlay_no_center, title, title_font, 960, 105, title_start, title_end, anchor="mm", stroke_width=1)
+        draw_gradient_text(overlay_no_center, artist, artist_font, 960, 975, artist_start, artist_end, anchor="mm", stroke_width=1)
+
     # Add optional vignette last
     if use_vignette:
         vignette = create_vignette_overlay(1920, 1080, strength=0.45)
         overlay = Image.alpha_composite(overlay, vignette)
+        if center_video_path:
+            overlay_no_center = Image.alpha_composite(overlay_no_center, vignette)
 
     # Composite the overlay onto the background to get final output image
     final_rgba = Image.alpha_composite(canvas, overlay)
@@ -785,11 +877,25 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
         overlay_path = output_path + ".overlay.png"
         config_path = output_path + ".config.json"
         overlay.save(overlay_path, "PNG")
+
+        # Build config dict
+        config_data = {
+            "center_image": os.path.abspath(chosen_center_image),
+            "overlay_image": os.path.abspath(overlay_path),
+            "center_video": None,
+            "overlay_no_center": None,
+        }
+
+        # If center is a video, save the no-center overlay and video path
+        if center_video_path:
+            overlay_no_center_path = output_path + ".overlay_no_center.png"
+            overlay_no_center.save(overlay_no_center_path, "PNG")
+            config_data["center_video"] = os.path.abspath(center_video_path)
+            config_data["overlay_no_center"] = os.path.abspath(overlay_no_center_path)
+            print(f"  ↳ Saved overlay without center for video compositing")
+
         with open(config_path, "w") as f:
-            json.dump({
-                "center_image": os.path.abspath(chosen_center_image),
-                "overlay_image": os.path.abspath(overlay_path)
-            }, f, indent=2)
+            json.dump(config_data, f, indent=2)
             
         print("  ✅ Thumbnail and overlay generation complete!")
     finally:

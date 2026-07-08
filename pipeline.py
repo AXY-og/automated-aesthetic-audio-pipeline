@@ -446,13 +446,35 @@ def run_batch_pipeline():
         if os.path.exists(old_overlay):
             shutil.move(old_overlay, new_overlay)
 
-        # Update the configuration file contents to point to new paths
+        # Move overlay_no_center.png if it exists (video center mode)
+        old_overlay_nc = task_config["thumbnail_path"] + ".overlay_no_center.png"
+        new_overlay_nc = batch_thumb + ".overlay_no_center.png"
+        if os.path.exists(old_overlay_nc):
+            shutil.move(old_overlay_nc, new_overlay_nc)
+
+        # Move center video if referenced in config
+        batch_center_video = None
         if os.path.exists(new_config):
             try:
                 with open(new_config, "r") as f:
                     cfg_data = json.load(f)
+                
+                # Handle center video file
+                center_vid = cfg_data.get("center_video")
+                if center_vid and os.path.exists(center_vid):
+                    vid_ext = os.path.splitext(center_vid)[1]
+                    batch_center_video = os.path.join("input", f"batch_{i}_center{vid_ext}")
+                    shutil.move(center_vid, batch_center_video)
+
+                # Update paths in config
                 cfg_data["center_image"] = os.path.abspath(batch_image)
                 cfg_data["overlay_image"] = os.path.abspath(new_overlay)
+                
+                if batch_center_video:
+                    cfg_data["center_video"] = os.path.abspath(batch_center_video)
+                if os.path.exists(new_overlay_nc):
+                    cfg_data["overlay_no_center"] = os.path.abspath(new_overlay_nc)
+
                 with open(new_config, "w") as f:
                     json.dump(cfg_data, f, indent=2)
             except Exception as e:
