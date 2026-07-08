@@ -430,26 +430,6 @@ def main(skip_effects=False, interactive_only=False):
         # Update yt_meta with confirmed details
         yt_meta["confirmed_artist"] = artist_name
         yt_meta["confirmed_song"] = song_name
-
-        # Auto-generate thumbnail immediately after download
-        try:
-            import thumbnail
-            name = os.path.splitext(os.path.basename(audio))[0]
-            thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
-            # Look for a local image or video/GIF in input/ (e.g. Pinterest image or animated center)
-            local_image = find_file(INPUT_DIR, ["jpg", "jpeg", "png", "gif", "mp4", "mov", "webm"])
-            
-            # Generate the thumbnail (uses YouTube thumbnail as fallback if no local image is present)
-            thumbnail.generate_thumbnail(
-                source_url, 
-                local_image, 
-                thumb_path,
-                title=yt_meta.get("confirmed_song"),
-                artist=yt_meta.get("confirmed_artist")
-            )
-            print(f"  ✅ Automatically generated styled thumbnail: {os.path.basename(thumb_path)}")
-        except Exception as e:
-            print(f"  ⚠️ Automatic thumbnail generation failed: {e}")
     else:
         audio = find_file(INPUT_DIR, ["mp3", "wav", "flac"])
         if not audio:
@@ -468,38 +448,86 @@ def main(skip_effects=False, interactive_only=False):
             "confirmed_song": song_name
         }
 
-    used_auto_thumbnail = False
-    image = find_file(INPUT_DIR, ["jpg", "jpeg", "png"])
+    # ── Resolve and crop center media ──
+    print("\n[Step 1] Resolving center media...")
     is_video_center = False
+    used_auto_thumbnail = False
+    
+    # 1. Look for local Pinterest image or video/GIF in input/
+    image = find_file(INPUT_DIR, ["jpg", "jpeg", "png"])
     if not image:
-        # Also look for video/GIF center media
         image = find_file(INPUT_DIR, ["gif", "mp4", "mov", "webm", "avi", "mkv"])
         if image:
             is_video_center = True
-            print(f"  Found video/GIF center media: {os.path.basename(image)}")
+            print(f"  ↳ Found video/GIF center media: {os.path.basename(image)}")
+
+    # 2. If no local media, and we have a YouTube URL, download its thumbnail as fallback
+    if not image and source_url:
+        print("  ↳ No local image or video found. Downloading YouTube thumbnail fallback...")
+        # Get thumbnail URL from yt_meta if already fetched, otherwise fetch it
+        thumb_url = yt_meta.get("thumbnail")
+        if not thumb_url:
+            try:
+                cmd = ["yt-dlp", "--no-playlist", "--dump-json", source_url]
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=20)
+                info = json.loads(proc.stdout)
+                thumb_url = info.get("thumbnail", "")
+            except Exception:
+                pass
+        from thumbnail import download_thumbnail
+        image = download_thumbnail(thumb_url)
+        if image:
+            print(f"  ↳ Downloaded YouTube fallback cover: {os.path.basename(image)}")
+
     if not image:
-        # Check if we generated a thumbnail that we can use as the video background
+        # Check if we already have a generated thumbnail we can use as a last resort
         name = os.path.splitext(os.path.basename(audio))[0]
         thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
         if os.path.exists(thumb_path):
-            print(f"  No center media found in input/. Using generated thumbnail as video background: {os.path.basename(thumb_path)}")
+            print(f"  ↳ Using existing thumbnail as video background: {os.path.basename(thumb_path)}")
             image = thumb_path
             used_auto_thumbnail = True
-        else:
-            print("No image or video file found in input/")
-            return None
+
+    if not image:
+        print("  ❌ Error: No cover image or video found in input/ and no YouTube fallback available.")
+        return None
 
     print(f"\nAudio  : {os.path.basename(audio)}")
     print(f"Center : {os.path.basename(image)}{' (video/GIF)' if is_video_center else ''}")
 
-    # ── Interactive 1:1 crop ──
+    # 3. Interactive Crop of resolved center media
     if is_video_center:
-        print("\nCenter media is a video/GIF — skipping interactive cropper.")
+        print("\nCenter media is a video/GIF — extracting first frame for interactive cropping...")
+        from thumbnail import extract_first_frame
+        first_frame = extract_first_frame(image)
+        first_frame_path = os.path.join(INPUT_DIR, "_center_first_frame.png")
+        first_frame.save(first_frame_path, "PNG")
+        
+        print("\nOpening cropper on video first frame to select custom crop/remove black bars...")
+        cropped_first_frame = crop_to_square(first_frame_path)
     elif not used_auto_thumbnail:
         print("\nOpening image cropper (crop to 1:1)...")
         image = crop_to_square(image)
     else:
         print("\nUsing generated thumbnail directly as video background (skipping cropper).")
+
+    # ── Step 2: Generate Styled Thumbnail and Config ──
+    print("\n[Step 2] Generating styled thumbnail and config...")
+    name = os.path.splitext(os.path.basename(audio))[0]
+    thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
+    
+    try:
+        import thumbnail
+        thumbnail.generate_thumbnail(
+            source_url, 
+            image, 
+            thumb_path,
+            title=yt_meta.get("confirmed_song"),
+            artist=yt_meta.get("confirmed_artist")
+        )
+        print(f"  ✅ Generated styled thumbnail and config: {os.path.basename(thumb_path)}")
+    except Exception as e:
+        print(f"  ⚠️ Styled thumbnail generation failed: {e}")
 
     if skip_effects:
         print("\n⏭  Skipping all effects (raw audio will be used)")
@@ -608,7 +636,20 @@ def main(skip_effects=False, interactive_only=False):
             existing_thumb=existing_thumb_path if os.path.exists(existing_thumb_path) else None,
             use_motion=use_motion)
 
-    shutil.rmtree(TEMP_DIR)
+    if os.path.exists(TEMP_DIR):
+        shutil.rmtree(TEMP_DIR)
+
+    # Clean up first frame temp files if they exist
+    for f in [
+        os.path.join(INPUT_DIR, "_center_first_frame.png"),
+        os.path.join(INPUT_DIR, "_center_first_frame.png.crop.json")
+    ]:
+        if os.path.exists(f):
+            try:
+                os.unlink(f)
+            except Exception:
+                pass
+
     print(f"\nDone → {output_path}")
     speed_factor = settings.get("slow", {}).get("speed", 1.0)
     yt_meta = locals().get("yt_meta", {})
@@ -670,7 +711,18 @@ def execute_task(task_config):
 
     if os.path.exists(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
-        
+
+    # Clean up first frame temp files if they exist
+    for f in [
+        os.path.join(INPUT_DIR, "_center_first_frame.png"),
+        os.path.join(INPUT_DIR, "_center_first_frame.png.crop.json")
+    ]:
+        if os.path.exists(f):
+            try:
+                os.unlink(f)
+            except Exception:
+                pass
+
     print(f"\nDone → {output_path}")
     speed_factor = settings.get("slow", {}).get("speed", 1.0)
     

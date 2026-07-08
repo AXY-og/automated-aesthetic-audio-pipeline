@@ -683,23 +683,28 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
         if input_videos:
             center_video_path = input_videos[0]
             print(f"  ↳ Found video/GIF center media in input/: {os.path.basename(center_video_path)}")
-            print(f"  ↳ Extracting first frame for thumbnail generation...")
-            first_frame = extract_first_frame(center_video_path)
-            # Save first frame as a temp PNG so existing code can use it
             first_frame_path = os.path.join("input", "_center_first_frame.png")
-            first_frame.save(first_frame_path, "PNG")
+            if os.path.exists(first_frame_path):
+                print(f"  ↳ Reusing pre-extracted/cropped first frame: {os.path.basename(first_frame_path)}")
+            else:
+                print(f"  ↳ Extracting first frame for thumbnail generation...")
+                first_frame = extract_first_frame(center_video_path)
+                first_frame.save(first_frame_path, "PNG")
+                print(f"  ✅ First frame extracted ({first_frame.size[0]}x{first_frame.size[1]})")
             chosen_center_image = first_frame_path
-            print(f"  ✅ First frame extracted ({first_frame.size[0]}x{first_frame.size[1]})")
     elif chosen_center_image and is_video_file(chosen_center_image):
         # The pinterest_image_path itself is a video/GIF
         center_video_path = chosen_center_image
         print(f"  ↳ Center media is a video/GIF: {os.path.basename(center_video_path)}")
-        print(f"  ↳ Extracting first frame for thumbnail generation...")
-        first_frame = extract_first_frame(center_video_path)
         first_frame_path = os.path.join("input", "_center_first_frame.png")
-        first_frame.save(first_frame_path, "PNG")
+        if os.path.exists(first_frame_path):
+            print(f"  ↳ Reusing pre-extracted/cropped first frame: {os.path.basename(first_frame_path)}")
+        else:
+            print(f"  ↳ Extracting first frame for thumbnail generation...")
+            first_frame = extract_first_frame(center_video_path)
+            first_frame.save(first_frame_path, "PNG")
+            print(f"  ✅ First frame extracted ({first_frame.size[0]}x{first_frame.size[1]})")
         chosen_center_image = first_frame_path
-        print(f"  ✅ First frame extracted ({first_frame.size[0]}x{first_frame.size[1]})")
 
     if not chosen_center_image or not os.path.exists(chosen_center_image):
         if temp_art and os.path.exists(temp_art):
@@ -884,7 +889,18 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
             "overlay_image": os.path.abspath(overlay_path),
             "center_video": None,
             "overlay_no_center": None,
+            "crop_info": None,
         }
+
+        # If crop config exists, load and embed it
+        crop_json_path = chosen_center_image + ".crop.json"
+        if os.path.exists(crop_json_path):
+            try:
+                with open(crop_json_path, "r") as f:
+                    config_data["crop_info"] = json.load(f)
+                print(f"  ↳ Embedded crop coordinates: {config_data['crop_info']}")
+            except Exception as e:
+                print(f"  ⚠️ Warning: Failed to load crop config JSON: {e}")
 
         # If center is a video, save the no-center overlay and video path
         if center_video_path:

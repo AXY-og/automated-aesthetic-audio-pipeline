@@ -12,13 +12,33 @@ from PIL import Image, ImageEnhance
 import tempfile
 
 
-def extract_center_video_frames(video_path, target_size=660, fps=30):
-    """Extract all frames from a video/GIF, square-crop, and resize to target_size.
+def extract_center_video_frames(video_path, target_size=660, fps=30, crop_info=None):
+    """Extract all frames from a video/GIF, square-crop (or use crop_info), and resize to target_size.
 
     Returns a list of PIL RGBA Images ready to be pasted at the center position.
     Uses FFmpeg to extract frames at the target fps. For GIFs, uses PIL directly.
     """
     ext = os.path.splitext(video_path)[1].lower()
+
+    # Define crop helper for a single frame
+    def process_frame(frame):
+        if crop_info:
+            rot = crop_info.get("rotation", 0)
+            if rot % 360 != 0:
+                frame = frame.rotate(-rot, expand=True)
+            x1 = crop_info.get("x1", 0)
+            y1 = crop_info.get("y1", 0)
+            x2 = crop_info.get("x2", frame.width)
+            y2 = crop_info.get("y2", frame.height)
+            frame = frame.crop((x1, y1, x2, y2))
+        else:
+            w, h = frame.size
+            min_dim = min(w, h)
+            left = (w - min_dim) // 2
+            top = (h - min_dim) // 2
+            frame = frame.crop((left, top, left + min_dim, top + min_dim))
+        
+        return frame.resize((target_size, target_size), Image.Resampling.LANCZOS)
 
     if ext == ".gif":
         # Use PIL to extract GIF frames natively
@@ -27,13 +47,7 @@ def extract_center_video_frames(video_path, target_size=660, fps=30):
         try:
             while True:
                 frame = gif.copy().convert("RGBA")
-                # Square crop from center
-                w, h = frame.size
-                min_dim = min(w, h)
-                left = (w - min_dim) // 2
-                top = (h - min_dim) // 2
-                frame = frame.crop((left, top, left + min_dim, top + min_dim))
-                frame = frame.resize((target_size, target_size), Image.Resampling.LANCZOS)
+                frame = process_frame(frame)
                 frames.append(frame)
                 gif.seek(gif.tell() + 1)
         except EOFError:
@@ -62,13 +76,7 @@ def extract_center_video_frames(video_path, target_size=660, fps=30):
         frames = []
         for fname in frame_files:
             frame = Image.open(os.path.join(tmp_dir, fname)).convert("RGBA")
-            # Square crop from center
-            w, h = frame.size
-            min_dim = min(w, h)
-            left = (w - min_dim) // 2
-            top = (h - min_dim) // 2
-            frame = frame.crop((left, top, left + min_dim, top + min_dim))
-            frame = frame.resize((target_size, target_size), Image.Resampling.LANCZOS)
+            frame = process_frame(frame)
             frames.append(frame)
 
         print(f"  ↳ Extracted {len(frames)} frames from video at {fps}fps")
@@ -223,7 +231,7 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
     if use_video_center:
         print(f"  ↳ Video center mode: {os.path.basename(center_video_path)}")
         print(f"  ↳ Pre-extracting center video frames...")
-        center_frames = extract_center_video_frames(center_video_path, target_size=660, fps=fps)
+        center_frames = extract_center_video_frames(center_video_path, target_size=660, fps=fps, crop_info=config.get("crop_info"))
         if not center_frames:
             print("  ⚠️ No frames extracted from center video. Falling back to static mode.")
             use_video_center = False

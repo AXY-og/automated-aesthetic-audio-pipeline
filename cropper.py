@@ -1620,6 +1620,21 @@ class CropperApp:
             cw, ch = int(self.crop_w), int(self.crop_h)
             grade_label = f" [{self.color_grade}]" if self.color_grade != "none" else ""
             print(f"  ✅ Cropped to {cw}×{ch}{grade_label} → {self.image_path}")
+
+        # Save crop information to a metadata file for video frame cropping
+        import json
+        crop_info_path = self.image_path + ".crop.json"
+        try:
+            with open(crop_info_path, "w") as f:
+                json.dump({
+                    "x1": int(self.crop_x),
+                    "y1": int(self.crop_y),
+                    "x2": int(self.crop_x + self.crop_w),
+                    "y2": int(self.crop_y + self.crop_h),
+                    "rotation": self.rotation
+                }, f, indent=2)
+        except Exception as e:
+            print(f"  ⚠️ Warning: Failed to save crop config JSON: {e}")
             
         self.root.destroy()
 
@@ -1636,6 +1651,22 @@ class CropperApp:
             print(f"  ↳ Saved rotated image ({self.rotation % 360}°), no crop applied.")
         else:
             print("  ↳ Skipped cropping.")
+
+        # Save skip information to a metadata file for video frame cropping
+        import json
+        crop_info_path = self.image_path + ".crop.json"
+        try:
+            with open(crop_info_path, "w") as f:
+                json.dump({
+                    "x1": 0,
+                    "y1": 0,
+                    "x2": self.original.width,
+                    "y2": self.original.height,
+                    "rotation": self.rotation
+                }, f, indent=2)
+        except Exception as e:
+            print(f"  ⚠️ Warning: Failed to save skip crop config JSON: {e}")
+
         self.root.destroy()
 
     # ── run ────────────────────────────────────────────────────────────
