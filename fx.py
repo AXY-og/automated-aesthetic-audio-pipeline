@@ -11,6 +11,16 @@ from scipy.signal import butter, sosfilt, sosfilt_zi
 from pedalboard.io import AudioFile
 from cropper import crop_to_square
 
+def open_file(filepath):
+    import platform
+    if platform.system() == "Darwin":
+        try:
+            subprocess.Popen(["open", filepath])
+            print(f"  ↳ Auto-opened: {os.path.basename(filepath)}")
+        except Exception as e:
+            print(f"  ⚠️ Warning: Could not auto-open test video: {e}")
+
+
 INPUT_DIR = "input"
 OUTPUT_DIR = "output"
 TEMP_DIR = "temp"
@@ -318,6 +328,111 @@ def combine(image_path, audio_path, output_path, profile, youtube_url=None, exis
         print(f"\n  ❌ FFmpeg failed (exit {proc.returncode}):")
         print(proc.stderr.decode(errors="replace"))
         proc.check_returncode()  # raise CalledProcessError
+
+
+def render_with_tweaking_loop(image_path, audio_path, output_path, profile, source_url, 
+                              existing_thumb_path, use_motion, test_mode, title, artist):
+    """
+    Unified rendering function that always renders a 15-second test video first,
+    opens it automatically for review, and lets the user tweak background/filters in the GUI
+    before generating the final output.
+    """
+    import os
+    import json
+    
+    # Enforce test output path first
+    base_no_ext = os.path.splitext(output_path)[0]
+    test_output_path = base_no_ext + "_test.mp4"
+    
+    # Check if the existing_thumb exists, otherwise determine thumb_base
+    thumb_base = existing_thumb_path if existing_thumb_path else (base_no_ext + ".png")
+    
+    print("\n" + "=" * 55)
+    if test_mode == "y":
+        print(f"  Generating test video: {os.path.basename(test_output_path)}")
+        combine(image_path, audio_path, test_output_path, profile, youtube_url=source_url,
+                existing_thumb=thumb_base if os.path.exists(thumb_base) else None, use_motion=use_motion)
+    else:
+        print(f"  Generating 15-second test snippet for review first...")
+        combine(image_path, audio_path, test_output_path, profile, youtube_url=source_url,
+                existing_thumb=thumb_base if os.path.exists(thumb_base) else None, use_motion=use_motion)
+
+    # Auto-open the test video
+    open_file(test_output_path)
+    
+    # Loop for user feedback and tweaking
+    while True:
+        print("\n" + "=" * 55)
+        print("  TEST VIDEO REVIEW & TWEAKING")
+        print("=" * 55)
+        print("Select an option:")
+        print("  1) Satisfied / Continue [Default]")
+        print("  2) Tweak colors, background, or text in cropper GUI")
+        print("  3) Re-play the test video")
+        choice = input("Enter 1, 2, or 3 [default 1]: ").strip()
+        
+        if not choice or choice == "1":
+            break
+        elif choice == "3":
+            print(f"  Re-playing test video: {os.path.basename(test_output_path)}")
+            open_file(test_output_path)
+            continue
+        elif choice == "2":
+            # Determine config.json path
+            config_path = thumb_base + ".config.json"
+            if not os.path.exists(config_path):
+                print("  ⚠️ Configuration file not found. Cannot tweak settings.")
+                continue
+                
+            try:
+                with open(config_path, "r") as f:
+                    cfg = json.load(f)
+            except Exception as e:
+                print(f"  ⚠️ Failed to read config JSON: {e}")
+                continue
+                
+            crop_target = cfg["center_image"]
+            print(f"\n  Opening cropper GUI on: {os.path.basename(crop_target)}")
+            
+            # Open cropper on target image
+            from cropper import crop_to_square
+            crop_to_square(crop_target)
+            
+            # Regenerate thumbnail using original image/video path
+            import thumbnail
+            orig_media = cfg.get("center_video") or cfg["center_image"]
+            print("\n  Regenerating styled thumbnail overlays with updated tweaks...")
+            thumbnail.generate_thumbnail(
+                source_url,
+                orig_media,
+                thumb_base,
+                title=title,
+                artist=artist
+            )
+            
+            # Re-render 15s test video with updated configuration
+            print("\n  Re-rendering 15-second test video with updated tweaks...")
+            combine(image_path, audio_path, test_output_path, profile, youtube_url=source_url,
+                    existing_thumb=thumb_base if os.path.exists(thumb_base) else None, use_motion=use_motion)
+            
+            # Auto-open the updated test video
+            open_file(test_output_path)
+
+    # Proceed to finalize final output path
+    if test_mode == "y":
+        return test_output_path
+    else:
+        print(f"\n  Proceeding to render the full-length video: {os.path.basename(output_path)}")
+        combine(image_path, audio_path, output_path, profile, youtube_url=source_url,
+                existing_thumb=thumb_base if os.path.exists(thumb_base) else None, use_motion=use_motion)
+                
+        # Clean up temporary test video file to keep directory clean
+        if os.path.exists(test_output_path):
+            try:
+                os.unlink(test_output_path)
+            except Exception:
+                pass
+        return output_path
 
 
 def download_youtube_audio(url):
@@ -632,9 +747,11 @@ def main(skip_effects=False, interactive_only=False):
     existing_thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
 
     print("Combining audio and image...")
-    combine(image, current, output_path, profile, youtube_url=source_url,
-            existing_thumb=existing_thumb_path if os.path.exists(existing_thumb_path) else None,
-            use_motion=use_motion)
+    output_path = render_with_tweaking_loop(
+        image, current, output_path, profile, source_url, 
+        existing_thumb_path, use_motion, test_mode,
+        title=yt_meta.get("confirmed_song"), artist=yt_meta.get("confirmed_artist")
+    )
 
     if os.path.exists(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
@@ -705,9 +822,11 @@ def execute_task(task_config):
         output_path = os.path.join(OUTPUT_DIR, f"{name}.mp4")
 
     print("Combining audio and image...")
-    combine(image, current, output_path, profile, youtube_url=source_url,
-            existing_thumb=existing_thumb_path if os.path.exists(existing_thumb_path) else None,
-            use_motion=use_motion)
+    output_path = render_with_tweaking_loop(
+        image, current, output_path, profile, source_url, 
+        existing_thumb_path, use_motion, test_mode,
+        title=task_config.get("song_name"), artist=task_config.get("artist_name")
+    )
 
     if os.path.exists(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
