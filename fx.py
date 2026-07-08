@@ -156,7 +156,7 @@ def find_file(directory, extensions):
     return None
 
 
-STORED_LINKS_PATH = os.path.join(INPUT_DIR, "stored_links.json")
+STORED_LINKS_PATH = "stored_links.json"
 
 def load_stored_links():
     if os.path.exists(STORED_LINKS_PATH):
