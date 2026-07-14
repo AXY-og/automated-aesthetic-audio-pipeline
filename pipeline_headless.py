@@ -104,7 +104,54 @@ def burn_text_overlays(img, text_overlays):
 def prepare_pinterest_media_headless(pinterest_path, crop_info, text_overlays=None):
     """Rotate, crop, apply color adjustments, and bake text overlays onto center media."""
     print(f"\n[Headless] Cropping and adjusting Pinterest media: {pinterest_path}")
-    img = Image.open(pinterest_path)
+    
+    ext = os.path.splitext(pinterest_path)[1].lstrip(".").lower()
+    is_video = ext in ["gif", "mp4", "mov", "webm", "avi", "mkv"]
+    
+    temp_img_path = pinterest_path
+    if is_video:
+        import subprocess
+        color_adj = crop_info.get("color_adjustments", {})
+        time_seconds = color_adj.get("selected_frame_time", 0.0)
+        
+        extracted_path = os.path.join(TEMP_DIR, "_extracted_frame.png")
+        if os.path.exists(extracted_path):
+            try:
+                os.unlink(extracted_path)
+            except Exception:
+                pass
+                
+        success = False
+        if ext == "gif":
+            try:
+                gif_img = Image.open(pinterest_path)
+                gif_img.seek(0)
+                gif_img.convert("RGB").save(extracted_path, "PNG")
+                success = True
+            except Exception:
+                pass
+                
+        if not success:
+            try:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(time_seconds),
+                    "-i", pinterest_path,
+                    "-frames:v", "1",
+                    "-q:v", "2",
+                    extracted_path
+                ]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                success = True
+            except Exception as e:
+                print(f"  ⚠️ FFmpeg extraction failed: {e}")
+                
+        if success and os.path.exists(extracted_path):
+            temp_img_path = extracted_path
+        else:
+            print("  ❌ Could not extract frame from video, falling back to original file.")
+            
+    img = Image.open(temp_img_path)
     
     # Apply rotation
     rotation = crop_info.get("rotation", 0)
@@ -143,10 +190,6 @@ def prepare_pinterest_media_headless(pinterest_path, crop_info, text_overlays=No
     if text_overlays:
         burn_text_overlays(cropped, text_overlays)
 
-    # Determine output format and paths
-    ext = os.path.splitext(pinterest_path)[1].lstrip(".").lower()
-    is_video = ext in ["gif", "mp4", "mov", "webm", "avi", "mkv"]
-    
     if is_video:
         out_path = os.path.join(INPUT_DIR, "_center_first_frame.png")
     else:

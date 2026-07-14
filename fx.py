@@ -865,7 +865,7 @@ def download_youtube_audio(url):
         "noplaylist": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios"]
+                "player_client": ["ios", "tv"]
             }
         },
         "nocheckcertificate": True,
