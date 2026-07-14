@@ -999,6 +999,11 @@ def download_via_proxy(url):
             "nocheckcertificate": True,
             "proxy": proxy_url,
             "socket_timeout": 8,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android_music", "tvHtml5", "android", "ios"]
+                }
+            },
         }
         
         try:
@@ -1203,6 +1208,11 @@ def download_youtube_audio(url, direct_audio_url=None):
             "no_warnings": True,
             "noplaylist": True,
             "nocheckcertificate": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android_music", "tvHtml5", "android", "ios"]
+                }
+            },
         }
         
         try:
