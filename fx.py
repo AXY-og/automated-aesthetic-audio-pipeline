@@ -851,44 +851,75 @@ def download_via_cobalt(youtube_url):
     import urllib.request
     
     print(f"  🚀 Attempting download via Cobalt API for: {youtube_url}")
+    
+    # We will try both the v10 root endpoint and the v7 /api/json endpoint for each instance
     instances = [
         "https://api.cobalt.tools",
-        "https://co.wuk.sh",
-        "https://cobalt.tools"
+        "https://cobalt.tools",
+        "https://co.wuk.sh"
     ]
     
-    payload = {
+    v10_payload = {
+        "url": youtube_url,
+        "downloadMode": "audio",
+        "audioFormat": "mp3"
+    }
+    
+    v7_payload = {
         "url": youtube_url,
         "vQuality": "max",
         "aFormat": "mp3",
         "isAudioOnly": True
     }
     
-    data = json.dumps(payload).encode("utf-8")
-    
     for instance in instances:
-        api_url = f"{instance}/api/json"
-        print(f"  Trying Cobalt instance: {api_url}")
-        req = urllib.request.Request(
-            api_url,
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-            },
-            method="POST"
-        )
+        # 1. Try v10 API format (POST to /)
         try:
-            with urllib.request.urlopen(req, timeout=25) as response:
+            api_url = f"{instance}/"
+            print(f"  Trying Cobalt v10 endpoint: {api_url}")
+            data = json.dumps(v10_payload).encode("utf-8")
+            req = urllib.request.Request(
+                api_url,
+                data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=20) as response:
                 resp_data = json.loads(response.read().decode("utf-8"))
-                print(f"  Cobalt response status: {resp_data.get('status')}")
-                
+                print(f"    Cobalt v10 response: {resp_data}")
                 stream_url = resp_data.get("url")
                 if stream_url:
                     return stream_url
         except Exception as e:
-            print(f"  ⚠️ Cobalt instance {api_url} failed: {e}")
+            print(f"    ⚠️ v10 endpoint failed: {e}")
+            
+        # 2. Try legacy v7 API format (POST to /api/json)
+        try:
+            api_url = f"{instance}/api/json"
+            print(f"  Trying Cobalt v7 endpoint: {api_url}")
+            data = json.dumps(v7_payload).encode("utf-8")
+            req = urllib.request.Request(
+                api_url,
+                data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=20) as response:
+                resp_data = json.loads(response.read().decode("utf-8"))
+                print(f"    Cobalt v7 response: {resp_data}")
+                stream_url = resp_data.get("url")
+                if stream_url:
+                    return stream_url
+        except Exception as e:
+            print(f"    ⚠️ v7 endpoint failed: {e}")
             
     return None
 
