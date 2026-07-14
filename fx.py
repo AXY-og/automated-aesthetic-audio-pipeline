@@ -870,6 +870,12 @@ def download_youtube_audio(url):
         },
         "nocheckcertificate": True,
     }
+    
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        opts["impersonate"] = ImpersonateTarget.from_str("chrome-110:windows-10")
+    except Exception as e:
+        print(f"⚠️ Could not set yt-dlp impersonation: {e}")
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         title = info.get("title", "audio")
