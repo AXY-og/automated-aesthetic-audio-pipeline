@@ -846,6 +846,80 @@ def render_with_tweaking_loop(image_path, audio_path, output_path, profile, sour
     }
 
 
+def download_via_cobalt(youtube_url):
+    import json
+    import urllib.request
+    
+    print(f"  🚀 Attempting download via Cobalt API for: {youtube_url}")
+    instances = [
+        "https://api.cobalt.tools",
+        "https://co.wuk.sh",
+        "https://cobalt.tools"
+    ]
+    
+    payload = {
+        "url": youtube_url,
+        "vQuality": "max",
+        "aFormat": "mp3",
+        "isAudioOnly": True
+    }
+    
+    data = json.dumps(payload).encode("utf-8")
+    
+    for instance in instances:
+        api_url = f"{instance}/api/json"
+        print(f"  Trying Cobalt instance: {api_url}")
+        req = urllib.request.Request(
+            api_url,
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            },
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=25) as response:
+                resp_data = json.loads(response.read().decode("utf-8"))
+                print(f"  Cobalt response status: {resp_data.get('status')}")
+                
+                stream_url = resp_data.get("url")
+                if stream_url:
+                    return stream_url
+        except Exception as e:
+            print(f"  ⚠️ Cobalt instance {api_url} failed: {e}")
+            
+    return None
+
+def fetch_youtube_oembed(url):
+    import urllib.parse
+    import urllib.request
+    import json
+    
+    print(f"  Fetching oEmbed metadata for: {url}")
+    try:
+        encoded_url = urllib.parse.quote(url)
+        oembed_url = f"https://www.youtube.com/oembed?url={encoded_url}&format=json"
+        
+        req = urllib.request.Request(
+            oembed_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            return {
+                "yt_title": data.get("title", "Audio"),
+                "artist": data.get("author_name", ""),
+                "channel": data.get("author_name", ""),
+                "channel_url": data.get("author_url", "")
+            }
+    except Exception as e:
+        print(f"  ⚠️ oEmbed fetch failed: {e}")
+        return None
+
 def download_youtube_audio(url):
     """Download audio from a YouTube URL as high-quality WAV into INPUT_DIR.
 
@@ -853,41 +927,104 @@ def download_youtube_audio(url):
         yt_title, artist, channel, channel_url
     """
     os.makedirs(INPUT_DIR, exist_ok=True)
-    opts = {
-        "format": "bestaudio/best",
-        "outtmpl": os.path.join(INPUT_DIR, "%(title)s.%(ext)s"),
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "wav",
-        }],
-        "quiet": False,
-        "no_warnings": True,
-        "noplaylist": True,
-        "nocheckcertificate": True,
-    }
     
     try:
-        from yt_dlp.networking.impersonate import ImpersonateTarget
-        opts["impersonate"] = ImpersonateTarget.from_str("chrome-110:windows-10")
-    except Exception as e:
-        print(f"⚠️ Could not set yt-dlp impersonation: {e}")
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        title = info.get("title", "audio")
+        print(f"  🎵 Attempting download with yt-dlp first...")
+        opts = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(INPUT_DIR, "%(title)s.%(ext)s"),
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "wav",
+            }],
+            "quiet": False,
+            "no_warnings": True,
+            "noplaylist": True,
+            "nocheckcertificate": True,
+        }
+        
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            opts["impersonate"] = ImpersonateTarget.from_str("chrome-110:windows-10")
+        except Exception as e:
+            print(f"⚠️ Could not set yt-dlp impersonation: {e}")
+            
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            title = info.get("title", "audio")
 
-    yt_meta = {
-        "yt_title": title,
-        "artist": info.get("artist", "") or info.get("uploader", ""),
-        "channel": info.get("channel", "") or info.get("uploader", ""),
-        "channel_url": info.get("channel_url", "") or info.get("uploader_url", ""),
-    }
+        yt_meta = {
+            "yt_title": title,
+            "artist": info.get("artist", "") or info.get("uploader", ""),
+            "channel": info.get("channel", "") or info.get("uploader", ""),
+            "channel_url": info.get("channel_url", "") or info.get("uploader_url", ""),
+        }
+        
+        downloaded = os.path.join(INPUT_DIR, f"{title}.wav")
+        if os.path.exists(downloaded):
+            return downloaded, yt_meta
+        return find_file(INPUT_DIR, ["wav"]), yt_meta
 
-    # yt-dlp names the output <title>.wav
-    downloaded = os.path.join(INPUT_DIR, f"{title}.wav")
-    if os.path.exists(downloaded):
-        return downloaded, yt_meta
-    # Fallback: find whatever wav just appeared
-    return find_file(INPUT_DIR, ["wav"]), yt_meta
+    except Exception as primary_err:
+        print(f"  ⚠️ yt-dlp failed (likely YouTube bot check block): {primary_err}")
+        print(f"  🔄 Falling back to Cobalt API + YouTube oEmbed...")
+        
+        # 1. Fetch metadata via oEmbed
+        yt_meta = fetch_youtube_oembed(url)
+        if not yt_meta:
+            yt_meta = {
+                "yt_title": "Audio",
+                "artist": "Unknown Artist",
+                "channel": "Unknown Channel",
+                "channel_url": ""
+            }
+        
+        title = yt_meta["yt_title"]
+        # Clean title for filename compatibility
+        clean_title = "".join([c for c in title if c.isalnum() or c in " -_"]).strip()
+        if not clean_title:
+            clean_title = "audio"
+            
+        # 2. Get direct download URL via Cobalt
+        stream_url = download_via_cobalt(url)
+        if not stream_url:
+            raise RuntimeError(f"All download methods failed. Original error: {primary_err}")
+            
+        # 3. Download the stream from Cobalt
+        import urllib.request
+        temp_audio_path = os.path.join(INPUT_DIR, f"{clean_title}.mp3")
+        print(f"  📥 Downloading audio stream from: {stream_url}")
+        
+        req = urllib.request.Request(
+            stream_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=60) as response:
+            with open(temp_audio_path, "wb") as f:
+                f.write(response.read())
+        print(f"  ✅ Audio download complete. Size: {os.path.getsize(temp_audio_path)} bytes")
+        
+        # 4. Convert MP3 to WAV using ffmpeg
+        downloaded_wav = os.path.join(INPUT_DIR, f"{clean_title}.wav")
+        print(f"  🎵 Converting {temp_audio_path} to WAV...")
+        import subprocess
+        try:
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-i", temp_audio_path,
+                "-acodec", "pcm_s16le",
+                "-ar", "44100",
+                downloaded_wav
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            # Remove the temporary MP3 file
+            if os.path.exists(temp_audio_path):
+                os.unlink(temp_audio_path)
+            return downloaded_wav, yt_meta
+        except Exception as conv_err:
+            print(f"  ⚠️ FFmpeg conversion failed: {conv_err}. Returning raw file.")
+            return temp_audio_path, yt_meta
 
 
 def main(skip_effects=False, interactive_only=False):
