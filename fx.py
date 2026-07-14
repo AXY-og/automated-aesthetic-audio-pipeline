@@ -951,6 +951,119 @@ def fetch_youtube_oembed(url):
         print(f"  ⚠️ oEmbed fetch failed: {e}")
         return None
 
+def extract_youtube_video_id(url):
+    import re
+    match = re.search(r"(?:v=|\/v\/|embed\/|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})", url)
+    if match:
+        return match.group(1)
+    return None
+
+def download_via_invidious(youtube_url):
+    import json
+    import urllib.request
+    
+    video_id = extract_youtube_video_id(youtube_url)
+    if not video_id:
+        print("  ❌ Could not extract video ID from URL.")
+        return None, None
+        
+    print(f"  🚀 Attempting download via Invidious API for video ID: {video_id}")
+    
+    instances = []
+    try:
+        req = urllib.request.Request(
+            "https://api.invidious.io/instances.json?sort_by=type,health",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            instances_data = json.loads(response.read().decode("utf-8"))
+            for item in instances_data:
+                if len(item) == 2:
+                    domain = item[0]
+                    info = item[1]
+                    if info.get("type") == "https" and info.get("monitor", {}).get("uptime", 0) > 90:
+                        uri = info.get("uri")
+                        if uri:
+                            instances.append(uri.rstrip("/"))
+    except Exception as e:
+        print(f"  ⚠️ Failed to fetch instances from invidious.io: {e}")
+        
+    fallbacks = [
+        "https://invidious.tiekoetter.com",
+        "https://inv.nadeko.net",
+        "https://invidious.flokinet.to",
+        "https://invidious.projectsegfaut.im",
+        "https://inv.tux.im",
+        "https://invidious.no-logs.com",
+        "https://invidious.nerdvpn.de"
+    ]
+    for fb in fallbacks:
+        if fb not in instances:
+            instances.append(fb)
+            
+    print(f"  Found {len(instances)} Invidious instances to try.")
+    
+    for instance in instances:
+        api_url = f"{instance}/api/v1/videos/{video_id}"
+        print(f"  Trying Invidious instance API: {api_url}")
+        
+        req = urllib.request.Request(
+            api_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            }
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=12) as response:
+                video_data = json.loads(response.read().decode("utf-8"))
+                
+                title = video_data.get("title", "Audio")
+                author = video_data.get("author", "")
+                yt_meta = {
+                    "yt_title": title,
+                    "artist": author,
+                    "channel": author,
+                    "channel_url": f"{instance}/channel/{video_data.get('authorId', '')}" if video_data.get('authorId') else ""
+                }
+                
+                adaptive_formats = video_data.get("adaptiveFormats", [])
+                audio_streams = []
+                for fmt in adaptive_formats:
+                    fmt_type = fmt.get("type", "")
+                    if fmt_type.startswith("audio/"):
+                        audio_streams.append(fmt)
+                        
+                if audio_streams:
+                    def get_bitrate(x):
+                        try:
+                            return int(x.get("bitrate", 0))
+                        except Exception:
+                            return 0
+                    audio_streams.sort(key=get_bitrate, reverse=True)
+                    best_stream = audio_streams[0]
+                    stream_url = best_stream.get("url")
+                    
+                    if stream_url:
+                        if stream_url.startswith("/"):
+                            stream_url = f"{instance}{stream_url}"
+                        print(f"    Found best audio stream. Itag={best_stream.get('itag')}, Bitrate={best_stream.get('bitrate')}")
+                        return stream_url, yt_meta
+                        
+                format_streams = video_data.get("formatStreams", [])
+                if format_streams:
+                    best_stream = format_streams[0]
+                    stream_url = best_stream.get("url")
+                    if stream_url:
+                        if stream_url.startswith("/"):
+                            stream_url = f"{instance}{stream_url}"
+                        print(f"    Found combined stream. Itag={best_stream.get('itag')}")
+                        return stream_url, yt_meta
+                        
+        except Exception as e:
+            print(f"    ⚠️ Invidious instance {instance} failed: {e}")
+            
+    return None, None
+
 def download_youtube_audio(url):
     """Download audio from a YouTube URL as high-quality WAV into INPUT_DIR.
 
@@ -998,6 +1111,47 @@ def download_youtube_audio(url):
 
     except Exception as primary_err:
         print(f"  ⚠️ yt-dlp failed (likely YouTube bot check block): {primary_err}")
+        print(f"  🔄 Falling back to Invidious API first...")
+        
+        try:
+            stream_url, yt_meta = download_via_invidious(url)
+            if stream_url and yt_meta:
+                title = yt_meta["yt_title"]
+                clean_title = "".join([c for c in title if c.isalnum() or c in " -_"]).strip()
+                if not clean_title:
+                    clean_title = "audio"
+                
+                temp_audio_path = os.path.join(INPUT_DIR, f"{clean_title}.mp3")
+                print(f"  📥 Downloading audio stream from Invidious: {stream_url}")
+                
+                import urllib.request
+                req = urllib.request.Request(
+                    stream_url,
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=60) as response:
+                    with open(temp_audio_path, "wb") as f:
+                        f.write(response.read())
+                print(f"  ✅ Audio download complete. Size: {os.path.getsize(temp_audio_path)} bytes")
+                
+                # Convert MP3 to WAV using ffmpeg
+                downloaded_wav = os.path.join(INPUT_DIR, f"{clean_title}.wav")
+                print(f"  🎵 Converting {temp_audio_path} to WAV...")
+                import subprocess
+                subprocess.run([
+                    "ffmpeg", "-y",
+                    "-i", temp_audio_path,
+                    "-acodec", "pcm_s16le",
+                    "-ar", "44100",
+                    downloaded_wav
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                
+                if os.path.exists(temp_audio_path):
+                    os.unlink(temp_audio_path)
+                return downloaded_wav, yt_meta
+        except Exception as invidious_err:
+            print(f"  ⚠️ Invidious fallback failed: {invidious_err}")
+            
         print(f"  🔄 Falling back to Cobalt API + YouTube oEmbed...")
         
         # 1. Fetch metadata via oEmbed
