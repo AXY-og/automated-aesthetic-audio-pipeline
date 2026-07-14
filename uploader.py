@@ -296,6 +296,10 @@ def get_credentials():
         print("Refreshing expired token...")
         try:
             creds.refresh(Request())
+            # Save refreshed token for future runs
+            with open(TOKEN_FILE, "w") as f:
+                f.write(creds.to_json())
+            print("Token refreshed and saved successfully.")
         except Exception as e:
             print(f"Token refresh failed: {e}. Re-authenticating...")
             creds = None

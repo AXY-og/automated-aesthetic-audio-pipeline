@@ -669,7 +669,9 @@ def _avg_color_of_region(canvas, x, y, w, h):
 # ── Main generation ──────────────────────────────────────────────────
 
 
-def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=None, artist=None, effects=None):
+def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=None, artist=None, effects=None,
+                       use_glow=None, use_vignette=None, custom_text_rgb=None, font_choice=None, layout_choice=None,
+                       center_text_size=115, crop_info=None, interactive=True):
     """
     Main entry point: Generates a 1920x1080 thumbnail image.
     Uses a blurred version of the Pinterest image as the background.
@@ -788,15 +790,27 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
     canvas = canvas.convert("RGBA")
 
     # ── Optional effects prompt ──
-    print("\nOptional thumbnail effects:")
-    glow_choice = input("  Add brightness glow behind center image? (y/n) [default n]: ").strip().lower()
-    use_glow = glow_choice == "y"
+    if use_glow is None:
+        if interactive:
+            print("\nOptional thumbnail effects:")
+            glow_choice = input("  Add brightness glow behind center image? (y/n) [default n]: ").strip().lower()
+            use_glow = glow_choice == "y"
+        else:
+            use_glow = False
 
-    vignette_choice = input("  Add subtle vignette to edges? (y/n) [default n]: ").strip().lower()
-    use_vignette = vignette_choice == "y"
+    if use_vignette is None:
+        if interactive:
+            vignette_choice = input("  Add subtle vignette to edges? (y/n) [default n]: ").strip().lower()
+            use_vignette = vignette_choice == "y"
+        else:
+            use_vignette = False
 
     # ── Text color prompt ──
-    custom_text_rgb = prompt_text_color()
+    if custom_text_rgb is None:
+        if interactive:
+            custom_text_rgb = prompt_text_color()
+        else:
+            custom_text_rgb = None
 
     # ── Step 2: Center image ──
     print("\n[Step 2] Processing central image...")
@@ -809,10 +823,19 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
     crop_json_path = chosen_center_image + ".crop.json"
     apply_hdr_thumbnail = True   # default if no crop config exists
     apply_hdr_video = False      # default if no crop config exists
-    if os.path.exists(crop_json_path):
+    
+    crop_data = None
+    if crop_info is not None:
+        crop_data = crop_info
+    elif os.path.exists(crop_json_path):
         try:
             with open(crop_json_path, "r") as f:
                 crop_data = json.load(f)
+        except Exception as e:
+            print(f"  ⚠️ Warning: Could not read crop config JSON: {e}")
+
+    if crop_data:
+        try:
             color_adj = crop_data.get("color_adjustments")
             if color_adj:
                 from motion_bg import apply_color_adjustments_to_frame
@@ -870,13 +893,17 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
     canvas.paste(central_rgba, (central_x, central_y), central_rgba)
 
     # ── Step 4: Font setup ──
-    print("\n[Step 4] Typography setup...")
-    print("Select typography font:")
-    print("  1) Moontime (Elegant Cursive) [Default]")
-    print("  2) UnifrakturCook (Vintage Blackletter)")
-    print("  3) Rock Salt (Handwritten Brush)")
-    print("  4) Racing Sans One (Sporty Bold)")
-    font_choice = input("Enter 1, 2, 3, or 4 [default 1]: ").strip()
+    if font_choice is None:
+        if interactive:
+            print("\n[Step 4] Typography setup...")
+            print("Select typography font:")
+            print("  1) Moontime (Elegant Cursive) [Default]")
+            print("  2) UnifrakturCook (Vintage Blackletter)")
+            print("  3) Rock Salt (Handwritten Brush)")
+            print("  4) Racing Sans One (Sporty Bold)")
+            font_choice = input("Enter 1, 2, 3, or 4 [default 1]: ").strip()
+        else:
+            font_choice = "1"
 
     if font_choice == "2":
         font_path = "assets/fonts/UnifrakturCook.ttf"
@@ -912,21 +939,26 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
         artist_font = ImageFont.load_default()
 
     # Prompt layout choice
-    print("\nSelect text layout for the thumbnail:")
-    print("  1) Top/Bottom margins [Default]")
-    print("  2) Stacked in the center overlaying the image")
-    layout_choice = input("Enter 1 or 2 [default 1]: ").strip()
+    if layout_choice is None:
+        if interactive:
+            print("\nSelect text layout for the thumbnail:")
+            print("  1) Top/Bottom margins [Default]")
+            print("  2) Stacked in the center overlaying the image")
+            layout_choice = input("Enter 1 or 2 [default 1]: ").strip()
+        else:
+            layout_choice = "1"
+
     if layout_choice not in ["1", "2"]:
         layout_choice = "1"
 
-    center_text_size = 115
     if layout_choice == "2":
-        size_in = input("Enter font size for centered text (e.g. 50-200) [default 115]: ").strip()
-        if size_in:
-            try:
-                center_text_size = int(size_in)
-            except ValueError:
-                pass
+        if center_text_size == 115 and interactive:
+            size_in = input("Enter font size for centered text (e.g. 50-200) [default 115]: ").strip()
+            if size_in:
+                try:
+                    center_text_size = int(size_in)
+                except ValueError:
+                    pass
 
     # ── Step 5: Text color calculation ──
     print("[Step 5] Computing text colors...")

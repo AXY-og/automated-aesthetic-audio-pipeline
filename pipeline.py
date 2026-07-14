@@ -95,7 +95,8 @@ def _fetch_lyrics(artist, song):
 # ── Phase 2: Metadata (automated) ────────────────────────────────────
 
 def phase_metadata(source_url, artist_name="", song_name="", effects=None,
-                   artist_link="", original_link=""):
+                   artist_link="", original_link="", privacy_status=None, publish_at=None,
+                   interactive=True):
     """Build upload metadata automatically from scraped info."""
     print("\n" + "=" * 55)
     print("  PHASE 2 — UPLOAD METADATA")
@@ -106,9 +107,15 @@ def phase_metadata(source_url, artist_name="", song_name="", effects=None,
     if not song_name or not artist_name:
         print()
         if not artist_name:
-            artist_name = input("  Enter Artist name: ").strip()
+            if interactive:
+                artist_name = input("  Enter Artist name: ").strip()
+            else:
+                artist_name = "Unknown Artist"
         if not song_name:
-            song_name = input("  Enter Song name:   ").strip()
+            if interactive:
+                song_name = input("  Enter Song name:   ").strip()
+            else:
+                song_name = "Unknown Song"
 
     if not song_name or not artist_name:
         print("  ⚠️  Song name and artist name are required.")
@@ -233,28 +240,36 @@ I do not own the music or the artwork used in this video. All rights belong to t
     print(f"  │ Privacy Status: {metadata['privacy_status']}")
     print("  └─────────────────────────────────────────────\n")
 
-    # ── Let user review ──
-    choice = input("  Privacy status — (p)ublic / (u)nlisted / p(r)ivate [default unlisted]: ").strip().lower()
-    if choice.startswith("p") and not choice.startswith("pr"):
-        metadata["privacy_status"] = "public"
-    elif choice.startswith("r") or choice.startswith("pr"):
-        metadata["privacy_status"] = "private"
-    # else stays unlisted
+    # ── Privacy Status & Schedule ──
+    if interactive:
+        # ── Let user review ──
+        choice = input("  Privacy status — (p)ublic / (u)nlisted / p(r)ivate [default unlisted]: ").strip().lower()
+        if choice.startswith("p") and not choice.startswith("pr"):
+            metadata["privacy_status"] = "public"
+        elif choice.startswith("r") or choice.startswith("pr"):
+            metadata["privacy_status"] = "private"
+        # else stays unlisted
 
-    # ── Schedule ──
-    publish_at = _prompt_schedule()
-    if publish_at:
-        metadata["publish_at"] = publish_at
-        # YouTube requires private status for scheduled publishing
-        metadata["privacy_status"] = "private"
-        print(f"  📅 Scheduled for: {publish_at}")
-        print(f"     (privacy auto-set to 'private' — YouTube will publish it at the scheduled time)")
+        # ── Schedule ──
+        publish_at = _prompt_schedule()
+        if publish_at:
+            metadata["publish_at"] = publish_at
+            # YouTube requires private status for scheduled publishing
+            metadata["privacy_status"] = "private"
+            print(f"  📅 Scheduled for: {publish_at}")
+            print(f"     (privacy auto-set to 'private' — YouTube will publish it at the scheduled time)")
+    else:
+        # Headless path
+        if privacy_status:
+            metadata["privacy_status"] = privacy_status
+        if publish_at:
+            metadata["publish_at"] = publish_at
+            metadata["privacy_status"] = "private"
 
     # Re-save with final settings
     with open(METADATA_FILE, "w") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
 
-    print(f"\n  ✅ Metadata ready. Privacy: {metadata['privacy_status']}")
     return metadata
 
 
