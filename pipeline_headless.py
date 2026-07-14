@@ -235,8 +235,9 @@ def main():
     try:
         # 1. Download YouTube audio
         youtube_url = config["youtube_url"]
+        direct_audio_url = config.get("direct_audio_url")
         print(f"\n[Step 1] Downloading YouTube audio: {youtube_url}")
-        audio_path, yt_meta = fx.download_youtube_audio(youtube_url)
+        audio_path, yt_meta = fx.download_youtube_audio(youtube_url, direct_audio_url)
         if not audio_path or not os.path.exists(audio_path):
             raise FileNotFoundError("YouTube audio download failed.")
 

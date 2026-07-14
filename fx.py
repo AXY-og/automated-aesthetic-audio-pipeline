@@ -1133,7 +1133,7 @@ def download_via_invidious(youtube_url):
             
     return None, None
 
-def download_youtube_audio(url):
+def download_youtube_audio(url, direct_audio_url=None):
     """Download audio from a YouTube URL as high-quality WAV into INPUT_DIR.
 
     Returns (filepath, yt_meta) where yt_meta is a dict with keys:
@@ -1141,6 +1141,55 @@ def download_youtube_audio(url):
     """
     os.makedirs(INPUT_DIR, exist_ok=True)
     
+    if direct_audio_url:
+        print(f"  🚀 Direct audio URL provided: {direct_audio_url}")
+        yt_meta = fetch_youtube_oembed(url)
+        if not yt_meta:
+            yt_meta = {
+                "yt_title": "Audio",
+                "artist": "Unknown Artist",
+                "channel": "Unknown Channel",
+                "channel_url": ""
+            }
+        
+        title = yt_meta["yt_title"]
+        clean_title = "".join([c for c in title if c.isalnum() or c in " -_"]).strip()
+        if not clean_title:
+            clean_title = "audio"
+            
+        temp_audio_path = os.path.join(INPUT_DIR, f"{clean_title}.mp3")
+        print(f"  📥 Downloading direct audio stream from URL...")
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                direct_audio_url,
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, timeout=60) as response:
+                with open(temp_audio_path, "wb") as f:
+                    f.write(response.read())
+            print(f"  ✅ Direct download complete. Size: {os.path.getsize(temp_audio_path)} bytes")
+            
+            # Convert MP3 to WAV using ffmpeg
+            downloaded_wav = os.path.join(INPUT_DIR, f"{clean_title}.wav")
+            print(f"  🎵 Converting {temp_audio_path} to WAV...")
+            import subprocess
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-i", temp_audio_path,
+                "-acodec", "pcm_s16le",
+                "-ar", "44100",
+                downloaded_wav
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            
+            if os.path.exists(temp_audio_path):
+                os.unlink(temp_audio_path)
+            return downloaded_wav, yt_meta
+        except Exception as e:
+            print(f"  ⚠️ Direct download failed: {e}. Falling back to standard flow...")
+            if os.path.exists(temp_audio_path):
+                os.unlink(temp_audio_path)
+
     try:
         print(f"  🎵 Attempting download with yt-dlp first...")
         opts = {
