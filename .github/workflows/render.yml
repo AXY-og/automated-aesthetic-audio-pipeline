@@ -42,6 +42,7 @@ jobs:
 
       - name: Update YT_TOKEN_B64 secret if changed
         if: always()
+        continue-on-error: true
         run: |
           if [ -f token.json ] && [ ! -z "${{ secrets.SECRET_UPDATE_PAT }}" ]; then
             echo "${{ secrets.SECRET_UPDATE_PAT }}" | gh auth login --with-token
