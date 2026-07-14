@@ -31,8 +31,16 @@ def download_pinterest_media(url):
     import urllib.request
     import urllib.parse
     import json
+    import glob
     
     print(f"\n[Pinterest] Downloading media from URL: {url}")
+    
+    # Remove stale files from previous downloads first
+    for path in glob.glob(os.path.join(INPUT_DIR, "pinterest_download.*")):
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
@@ -47,6 +55,69 @@ def download_pinterest_media(url):
                 print(f"  ↳ Resolved short URL to: {url}")
         except Exception as e:
             print(f"  ⚠️ Redirect resolution failed: {e}")
+
+    # ── Attempt download using yt-dlp first (handles cookies, videos, streams dynamically) ──
+    import subprocess
+    import sys
+    
+    # Resolve local venv yt-dlp executable path to ensure compatibility
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    yt_dlp_path = os.path.join(script_dir, "venv", "bin", "yt-dlp")
+    if not os.path.exists(yt_dlp_path):
+        # Also try sys.executable directory fallback
+        venv_dir = os.path.dirname(sys.executable)
+        yt_dlp_path = os.path.join(venv_dir, "yt-dlp")
+        if not os.path.exists(yt_dlp_path):
+            yt_dlp_path = "yt-dlp"
+
+    downloaded = False
+    
+    # Try cookies from various browsers to bypass the login wall
+    for browser in ["chrome", "safari", "firefox"]:
+        # Run yt-dlp. Note: we hide warning spam if Keychain is denied or browser is not found
+        cmd = [
+            yt_dlp_path,
+            "--impersonate", browser,
+            "--cookies-from-browser", browser,
+            "-o", os.path.join(INPUT_DIR, "pinterest_download.%(ext)s"),
+            url
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # Check if file was actually downloaded (look for pinterest_download.*)
+        download_files = glob.glob(os.path.join(INPUT_DIR, "pinterest_download.*"))
+        if download_files:
+            print(f"  ↳ Video download complete using {browser} cookies!")
+            downloaded = True
+            break
+        else:
+            err_msg = proc.stderr.decode(errors="replace").strip()
+            if err_msg and "Traceback" not in err_msg:
+                # Print clean, truncated error message for debug
+                first_line = err_msg.split("\n")[0]
+                print(f"    (Cookies from {browser} failed: {first_line[:120]})")
+
+    # If cookies didn't work, try without cookies
+    if not downloaded:
+        cmd = [
+            yt_dlp_path,
+            "--impersonate", "chrome",
+            "-o", os.path.join(INPUT_DIR, "pinterest_download.%(ext)s"),
+            url
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        download_files = glob.glob(os.path.join(INPUT_DIR, "pinterest_download.*"))
+        if download_files:
+            print("  ↳ Video download complete (no cookies needed)!")
+            downloaded = True
+        else:
+            err_msg = proc.stderr.decode(errors="replace").strip()
+            if err_msg:
+                first_line = err_msg.split("\n")[0]
+                print(f"    (Anonymous download failed: {first_line[:120]})")
+
+    if downloaded:
+        # Successfully fetched the video via yt-dlp
+        return True
             
     # Download HTML
     req = urllib.request.Request(url, headers=headers)
@@ -55,6 +126,11 @@ def download_pinterest_media(url):
             html = response.read().decode('utf-8', errors='replace')
     except Exception as e:
         print(f"  ❌ Failed to download Pinterest page HTML: {e}")
+        return None
+
+    # Detect if we hit the Pinterest login wall / signup page
+    if "Welcome to Pinterest" in html or "Log in to discover more" in html or "id=\"registerForm\"" in html:
+        print("  ⚠️ Warning: Pinterest served a login wall for this URL, hiding the video streams.")
         return None
 
     # Search for all application/json script tags
@@ -444,14 +520,14 @@ def combine(image_path, audio_path, output_path, profile, youtube_url=None, exis
 
     if abs(ratio - target_ratio) < 0.05:
         print(f"  ↳ Scaling background directly to {tw}x{th} (no padding)")
-        vf = f"scale={tw}:{th}"
+        vf = f"scale=w={tw}:h={th}:out_color_matrix=bt709:in_range=full:out_range=limited"
     else:
         print(f"  ↳ Scaling background to {tw}x{th} with black padding")
-        vf = (f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+        vf = (f"scale=w={tw}:h={th}:force_original_aspect_ratio=decrease:out_color_matrix=bt709:in_range=full:out_range=limited,"
               f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:black")
 
-    # Prepend format conversion to handle PNGs with alpha / 16-bit depth
-    vf = f"format=yuv420p,{vf}"
+    # Append format conversion to handle PNGs with alpha / 16-bit depth
+    vf = f"{vf},format=yuv420p"
 
     cmd = [
         "ffmpeg", "-y",
@@ -465,6 +541,9 @@ def combine(image_path, audio_path, output_path, profile, youtube_url=None, exis
         "-bufsize", profile["bufsize"],
         "-c:a", "aac", "-b:a", "192k",
         "-pix_fmt", "yuv420p",
+        "-colorspace", "bt709",
+        "-color_trc", "bt709",
+        "-color_primaries", "bt709",
         "-shortest",
         output_path
     ]
@@ -486,6 +565,17 @@ def render_with_tweaking_loop(image_path, audio_path, output_path, profile, sour
     """
     import os
     import json
+    
+    # Format readable effects string for thumbnail rendering
+    parts = []
+    if effects:
+        if "slow" in effects:
+            parts.append("slowed")
+        if "reverb" in effects:
+            parts.append("reverb")
+        if "8d" in effects:
+            parts.append("8d")
+    effects_str = " + ".join(parts)
     
     # Enforce test output path first
     base_no_ext = os.path.splitext(output_path)[0]
@@ -518,8 +608,9 @@ def render_with_tweaking_loop(image_path, audio_path, output_path, profile, sour
         print("  3) Re-play the test video")
         if raw_audio_path:
             print("  4) Tweak audio effects (slow, reverb, 8d settings)")
+        print("  5) Generate additional thumbnail variant (for A/B testing)")
             
-        choice = input("Enter 1, 2, 3, or 4 [default 1]: ").strip()
+        choice = input("Enter 1, 2, 3, 4, or 5 [default 1]: ").strip()
         
         if not choice or choice == "1":
             break
@@ -542,19 +633,22 @@ def render_with_tweaking_loop(image_path, audio_path, output_path, profile, sour
                 continue
                 
             crop_target = cfg["center_image"]
+            orig_media = cfg.get("center_video") or cfg["center_image"]
+            is_video = bool(cfg.get("center_video"))
             
-            # Restore the original uncropped image from backup if it exists
-            backup_path = crop_target + ".original_backup.png"
-            if os.path.exists(backup_path):
-                import shutil
-                shutil.copy2(backup_path, crop_target)
-                print(f"  ↳ Restored original uncropped image for tweaking: {os.path.basename(crop_target)}")
+            if not is_video:
+                # Restore the original uncropped image from backup if it exists
+                backup_path = crop_target + ".original_backup.png"
+                if os.path.exists(backup_path):
+                    import shutil
+                    shutil.copy2(backup_path, crop_target)
+                    print(f"  ↳ Restored original uncropped image for tweaking: {os.path.basename(crop_target)}")
             
-            print(f"\n  Opening cropper GUI on: {os.path.basename(crop_target)}")
+            print(f"\n  Opening cropper GUI on: {os.path.basename(orig_media)}")
             
-            # Open cropper on target image
+            # Open cropper on target original media
             from cropper import crop_to_square
-            crop_to_square(crop_target)
+            crop_to_square(orig_media, crop_json=config_path)
             
             # Regenerate thumbnail using original image/video path
             import thumbnail
@@ -565,7 +659,8 @@ def render_with_tweaking_loop(image_path, audio_path, output_path, profile, sour
                 orig_media,
                 thumb_base,
                 title=title,
-                artist=artist
+                artist=artist,
+                effects=effects_str
             )
             
             # Re-render 15s test video with updated configuration
@@ -656,6 +751,76 @@ def render_with_tweaking_loop(image_path, audio_path, output_path, profile, sour
             
             # Auto-open the updated test video
             open_file(test_output_path)
+
+        elif choice == "5":
+            # Determine config.json path
+            config_path = thumb_base + ".config.json"
+            if not os.path.exists(config_path):
+                print("  ⚠️ Configuration file not found. Cannot generate variant.")
+                continue
+                
+            try:
+                with open(config_path, "r") as f:
+                    cfg = json.load(f)
+            except Exception as e:
+                print(f"  ⚠️ Failed to read config JSON: {e}")
+                continue
+                
+            crop_target = cfg["center_image"]
+            
+            # Determine next variant index
+            variant_idx = 1
+            while True:
+                variant_path = base_no_ext + f"_variant_{variant_idx}.png"
+                if not os.path.exists(variant_path):
+                    break
+                variant_idx += 1
+                
+            print(f"\n  Creating additional thumbnail variant: {os.path.basename(variant_path)}")
+            
+            # Ask if we want to run the cropper
+            run_crop = input("  Do you want to re-open the cropper GUI for a new frame/crop? (y/n) [default n]: ").strip().lower()
+            if run_crop == "y":
+                orig_media = cfg.get("center_video") or cfg["center_image"]
+                is_video = bool(cfg.get("center_video"))
+                if not is_video:
+                    # Restore the original uncropped image from backup if it exists
+                    backup_path = crop_target + ".original_backup.png"
+                    if os.path.exists(backup_path):
+                        import shutil
+                        shutil.copy2(backup_path, crop_target)
+                        print(f"  ↳ Restored original uncropped image for tweaking: {os.path.basename(crop_target)}")
+                
+                print(f"\n  Opening cropper GUI on: {os.path.basename(orig_media)}")
+                from cropper import crop_to_square
+                crop_to_square(orig_media, crop_json=config_path)
+            else:
+                print("  ↳ Reusing current cropped frame and adjustments.")
+                
+            # Generate the variant thumbnail
+            import thumbnail
+            orig_media = cfg.get("center_video") or cfg["center_image"]
+            print(f"\n  Generating styled thumbnail variant {variant_idx}...")
+            
+            try:
+                thumbnail.generate_thumbnail(
+                    source_url,
+                    orig_media,
+                    variant_path,
+                    title=title,
+                    artist=artist,
+                    effects=effects_str
+                )
+                print(f"  ✅ Variant thumbnail generated: {os.path.basename(variant_path)}")
+                
+                # Upload variant to Google Drive immediately
+                try:
+                    from uploader import upload_to_drive
+                    upload_to_drive(variant_path)
+                except Exception as ex:
+                    print(f"  ⚠️ Google Drive upload skipped/failed: {ex}")
+            except Exception as ex:
+                print(f"  ⚠️ Failed to generate variant thumbnail: {ex}")
 
     # Proceed to finalize final output path
     if test_mode == "y":
@@ -865,13 +1030,44 @@ def main(skip_effects=False, interactive_only=False):
     is_video_center = False
     used_auto_thumbnail = False
     
-    # 1. Look for local Pinterest image or video/GIF in input/
-    image = find_file(INPUT_DIR, ["jpg", "jpeg", "png"])
+    # 1. Look for downloaded Pinterest video/GIF in input/ first (prioritize video downloads)
+    video_extensions = ["gif", "mp4", "mov", "webm", "avi", "mkv"]
+    image = None
+    for ext in video_extensions:
+        p = os.path.join(INPUT_DIR, f"pinterest_download.{ext}")
+        if os.path.exists(p):
+            image = p
+            is_video_center = True
+            print(f"  ↳ Found downloaded video/GIF center media: {os.path.basename(image)}")
+            break
+            
+    # 2. If no downloaded video, check if there is a downloaded image
+    if not image:
+        image_extensions = ["jpg", "jpeg", "png"]
+        for ext in image_extensions:
+            p = os.path.join(INPUT_DIR, f"pinterest_download.{ext}")
+            if os.path.exists(p):
+                image = p
+                print(f"  ↳ Found downloaded image center media: {os.path.basename(image)}")
+                break
+
+    # 3. Fallback: Search for any local files (ignoring helper files like _center_first_frame.png)
+    if not image:
+        # Get all images in input folder
+        all_imgs = []
+        for ext in ["jpg", "jpeg", "png"]:
+            all_imgs.extend(glob.glob(os.path.join(INPUT_DIR, f"*.{ext}")))
+        # Filter out intermediate _center_first_frame
+        filtered_imgs = [img for img in all_imgs if "_center_first_frame.png" not in os.path.basename(img)]
+        if filtered_imgs:
+            image = filtered_imgs[0]
+            print(f"  ↳ Found local image center media: {os.path.basename(image)}")
+            
     if not image:
         image = find_file(INPUT_DIR, ["gif", "mp4", "mov", "webm", "avi", "mkv"])
         if image:
             is_video_center = True
-            print(f"  ↳ Found video/GIF center media: {os.path.basename(image)}")
+            print(f"  ↳ Found local video/GIF center media: {os.path.basename(image)}")
 
     # 2. If no local media, and we have a YouTube URL, download its thumbnail as fallback
     if not image and source_url:
@@ -909,23 +1105,8 @@ def main(skip_effects=False, interactive_only=False):
 
     # 3. Interactive Crop of resolved center media
     if is_video_center:
-        print("\nCenter media is a video/GIF — extracting first frame for interactive cropping...")
-        from thumbnail import extract_first_frame
-        first_frame = extract_first_frame(image)
-        first_frame_path = os.path.join(INPUT_DIR, "_center_first_frame.png")
-        first_frame.save(first_frame_path, "PNG")
-        
-        # Save a backup of the original uncropped first frame
-        first_frame_backup_path = first_frame_path + ".original_backup.png"
-        if os.path.exists(first_frame_backup_path):
-            try:
-                os.unlink(first_frame_backup_path)
-            except Exception:
-                pass
-        shutil.copy2(first_frame_path, first_frame_backup_path)
-        
-        print("\nOpening cropper on video first frame to select custom crop/remove black bars...")
-        cropped_first_frame = crop_to_square(first_frame_path)
+        print("\nCenter media is a video/GIF — opening cropper with interactive timeline...")
+        image = crop_to_square(image)
     elif not used_auto_thumbnail:
         # Save a backup of the original uncropped static image
         static_backup_path = image + ".original_backup.png"
@@ -940,24 +1121,6 @@ def main(skip_effects=False, interactive_only=False):
         image = crop_to_square(image)
     else:
         print("\nUsing generated thumbnail directly as video background (skipping cropper).")
-
-    # ── Step 2: Generate Styled Thumbnail and Config ──
-    print("\n[Step 2] Generating styled thumbnail and config...")
-    name = os.path.splitext(os.path.basename(audio))[0]
-    thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
-    
-    try:
-        import thumbnail
-        thumbnail.generate_thumbnail(
-            source_url, 
-            image, 
-            thumb_path,
-            title=yt_meta.get("confirmed_song"),
-            artist=yt_meta.get("confirmed_artist")
-        )
-        print(f"  ✅ Generated styled thumbnail and config: {os.path.basename(thumb_path)}")
-    except Exception as e:
-        print(f"  ⚠️ Styled thumbnail generation failed: {e}")
 
     if skip_effects:
         print("\n⏭  Skipping all effects (raw audio will be used)")
@@ -1001,6 +1164,35 @@ def main(skip_effects=False, interactive_only=False):
             settings["8d"] = {
                 "hz": prompt_float("Pan speed Hz", 0.125)
             }
+
+    # Format readable effects string for thumbnail rendering
+    parts = []
+    if "slow" in effects:
+        parts.append("slowed")
+    if "reverb" in effects:
+        parts.append("reverb")
+    if "8d" in effects:
+        parts.append("8d")
+    effects_str = " + ".join(parts)
+
+    # ── Step 2: Generate Styled Thumbnail and Config ──
+    print("\n[Step 2] Generating styled thumbnail and config...")
+    name = os.path.splitext(os.path.basename(audio))[0]
+    thumb_path = os.path.join(OUTPUT_DIR, f"{name}.png")
+    
+    try:
+        import thumbnail
+        thumbnail.generate_thumbnail(
+            source_url, 
+            image, 
+            thumb_path,
+            title=yt_meta.get("confirmed_song"),
+            artist=yt_meta.get("confirmed_artist"),
+            effects=effects_str
+        )
+        print(f"  ✅ Generated styled thumbnail and config: {os.path.basename(thumb_path)}")
+    except Exception as e:
+        print(f"  ⚠️ Styled thumbnail generation failed: {e}")
 
     # Prompt for resolution
     print("\nSelect target video resolution:")

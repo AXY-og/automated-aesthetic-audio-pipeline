@@ -335,6 +335,31 @@ def _prompt_schedule():
     return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.0Z")
 
 
+def cleanup_directories():
+    """Delete all files and folders inside input/ and output/ directories."""
+    print("🧹 Cleaning up input and output directories...")
+    import shutil
+    for folder in ["input", "output"]:
+        if os.path.exists(folder):
+            for filename in os.listdir(folder):
+                file_path = os.path.join(folder, filename)
+                try:
+                    # Skip deletion for A/B thumbnail variants to keep them locally
+                    if "_variant_" in filename and filename.lower().endswith((".png", ".jpg", ".jpeg")):
+                        print(f"  Preserving thumbnail variant: {filename}")
+                        continue
+                        
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        os.unlink(file_path)
+                        print(f"  Deleted file: {filename}")
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                        print(f"  Deleted folder: {filename}")
+                except Exception as e:
+                    print(f"  ⚠️ Failed to delete {file_path}: {e}")
+    print("  ✅ Cleanup complete.\n")
+
+
 # ── Phase 3: YouTube Upload ───────────────────────────────────────────
 
 def phase_upload(video_path, metadata):
@@ -356,23 +381,7 @@ def phase_upload(video_path, metadata):
         print(f"  🔗 {url}")
         print("=" * 55 + "\n")
 
-        # Clean up input and output directories
-        print("🧹 Cleaning up input and output directories...")
-        import shutil
-        for folder in ["input", "output"]:
-            if os.path.exists(folder):
-                for filename in os.listdir(folder):
-                    file_path = os.path.join(folder, filename)
-                    try:
-                        if os.path.isfile(file_path) or os.path.islink(file_path):
-                            os.unlink(file_path)
-                            print(f"  Deleted file: {filename}")
-                        elif os.path.isdir(file_path):
-                            shutil.rmtree(file_path)
-                            print(f"  Deleted folder: {filename}")
-                    except Exception as e:
-                        print(f"  ⚠️ Failed to delete {file_path}: {e}")
-        print("  ✅ Cleanup complete.\n")
+        cleanup_directories()
     else:
         print("\n  ❌ Upload failed. Please check the error above and try again.")
         sys.exit(1)
@@ -753,4 +762,12 @@ def main():
 
 
 if __name__ == "__main__":
+    import signal
+    
+    def signal_handler(sig, frame):
+        print("\n\n🛑 Program interrupted by user (Control+C).")
+        cleanup_directories()
+        sys.exit(1)
+        
+    signal.signal(signal.SIGINT, signal_handler)
     main()

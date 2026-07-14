@@ -47,17 +47,78 @@ _TK_FONT_FAMILIES = {
 
 
 class CropperApp:
-    def __init__(self, image_path, default_mode="1:1"):
+    def __init__(self, image_path, default_mode="1:1", crop_json=None):
         self.image_path = image_path
-        self.original = Image.open(image_path)
+        self.crop_json = crop_json
+        
+        # Determine if it's a video/GIF file
+        ext = os.path.splitext(image_path)[1].lstrip(".").lower()
+        self.is_video = ext in ["mp4", "mov", "webm", "gif", "avi", "mkv"]
+        self.video_path = image_path if self.is_video else None
+        
+        # Downstream pipeline expects output at input/_center_first_frame.png
+        if self.is_video:
+            self.output_image_path = os.path.join(os.path.dirname(image_path), "_center_first_frame.png")
+        else:
+            self.output_image_path = image_path
+
         self.rotation = 0                      # cumulative degrees (0/90/180/270)
         self.aspect_ratio_mode = default_mode  # "1:1" | "16:9"
         self.color_grade = "none"              # filter key string
-        self.bg_mode = "blur"                     # "none" | "blur" | "solid"
-        self.bg_color = (30, 30, 30)             # default solid bg color (dark grey)
+        self.bg_mode = "blur"                  # "none" | "blur" | "solid"
+        self.bg_color = (30, 30, 30)           # default solid bg color (dark grey)
+        self.selected_time = 0.0               # timestamp for video frame selection
+
+        crop_info = None
+        crop_json_path = self.crop_json if self.crop_json else (self.output_image_path + ".crop.json")
+        if os.path.exists(crop_json_path):
+            try:
+                import json
+                with open(crop_json_path, "r") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and "crop_info" in data:
+                    crop_info = data["crop_info"]
+                else:
+                    crop_info = data
+            except Exception as e:
+                print(f"  ⚠️ Warning: Failed to load previous crop config JSON: {e}")
+
+        # Extract previous adjustments if they exist
+        self.prev_adj = {}
+        if crop_info and "color_adjustments" in crop_info:
+            self.prev_adj = crop_info["color_adjustments"]
+            self.color_grade = self.prev_adj.get("color_grade", "none")
+            self.bg_mode = self.prev_adj.get("bg_mode", "blur")
+            self.selected_time = self.prev_adj.get("selected_frame_time", 0.0)
+            bg_col_val = self.prev_adj.get("bg_color")
+            if bg_col_val:
+                self.bg_color = tuple(bg_col_val)
+
+        if crop_info and "rotation" in crop_info:
+            self.rotation = crop_info["rotation"]
+
+        if self.is_video:
+            self._get_video_info()
+            print(f"  ↳ Video loaded: {os.path.basename(self.video_path)} ({self.video_duration:.2f}s, {self.video_w}x{self.video_h})")
+            print(f"  ↳ Restored selected frame time: {self.selected_time:.3f}s")
+            self.original = self._extract_frame_at_time(self.selected_time)
+            if not self.original:
+                self.original = Image.new("RGB", (640, 640), (40, 40, 40))
+        else:
+            self.original = Image.open(image_path)
 
         self._update_working_image()           # sets self.working, img_w, img_h
-        self._init_crop()                      # largest centred box
+
+        # Restore crop box coordinates if valid
+        if crop_info and "x1" in crop_info and "y1" in crop_info and "x2" in crop_info and "y2" in crop_info:
+            self.crop_x = float(crop_info["x1"])
+            self.crop_y = float(crop_info["y1"])
+            self.crop_w = float(crop_info["x2"] - crop_info["x1"])
+            self.crop_h = float(crop_info["y2"] - crop_info["y1"])
+            self._clamp()
+        else:
+            self._init_crop()                      # largest centred box
+
         self._fit_view()                       # zoom / offset to fill canvas
 
         # interaction state
@@ -75,6 +136,68 @@ class CropperApp:
         self._text_color = (255, 255, 255)
 
         self._build()
+
+    def _get_video_info(self):
+        """Extract video duration, width, and height using ffprobe."""
+        import subprocess
+        try:
+            cmd_dur = [
+                "ffprobe", "-v", "error", 
+                "-show_entries", "format=duration", 
+                "-of", "default=noprint_wrappers=1:nokey=1", 
+                self.video_path
+            ]
+            res_dur = subprocess.run(cmd_dur, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.video_duration = float(res_dur.stdout.strip())
+            
+            cmd_res = [
+                "ffprobe", "-v", "error", 
+                "-select_streams", "v:0", 
+                "-show_entries", "stream=width,height", 
+                "-of", "csv=s=x:p=0", 
+                self.video_path
+            ]
+            res_res = subprocess.run(cmd_res, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            parts = res_res.stdout.strip().split("x")
+            self.video_w, self.video_h = int(parts[0]), int(parts[1])
+        except Exception as e:
+            print(f"  ⚠️ Warning: Failed to extract video info using ffprobe: {e}")
+            self.video_duration = 10.0
+            self.video_w, self.video_h = 640, 640
+
+    def _extract_frame_at_time(self, time_s):
+        """Extract a single frame at the given timestamp using fast seeking ffmpeg."""
+        import subprocess
+        
+        # Keep temp directory within input/ to comply with permissions
+        temp_dir = os.path.join(os.path.dirname(self.image_path), ".cropper_temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_frame_path = os.path.join(temp_dir, "scrub_frame.png")
+        
+        cmd = [
+            "ffmpeg",
+            "-ss", f"{time_s:.3f}",
+            "-i", self.video_path,
+            "-vframes", "1",
+            "-f", "image2",
+            "-y", temp_frame_path
+        ]
+        # Run subprocess silently
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        if os.path.exists(temp_frame_path):
+            try:
+                # Copy to avoid locking file handles
+                with Image.open(temp_frame_path) as img:
+                    copied_img = img.copy()
+                try:
+                    os.unlink(temp_frame_path)
+                except Exception:
+                    pass
+                return copied_img
+            except Exception as e:
+                print(f"  ⚠️ Failed to load extracted frame: {e}")
+        return None
 
     # ── working image (after rotation) ─────────────────────────────────
 
@@ -142,7 +265,8 @@ class CropperApp:
         self.root = tk.Tk()
         self.root.title("Xenia — Crop Image")
         self.root.configure(bg="#1a1a2e")
-        self.root.resizable(False, False)
+        self.root.attributes("-fullscreen", True)
+        self.root.bind("<Escape>", lambda event: self.root.attributes("-fullscreen", not self.root.attributes("-fullscreen")))
 
         # ── toolbar ──
         self.bar = tk.Frame(self.root, bg="#16213e", pady=8, padx=8)
@@ -184,7 +308,7 @@ class CropperApp:
         tk.Frame(self.bar, width=12, bg="#16213e").pack(side=tk.LEFT)
 
         # Checkbutton for 16:9 Blurred BG
-        self.blur_bg_var = tk.IntVar(value=1)
+        self.blur_bg_var = tk.IntVar(value=self.prev_adj.get("blur_bg_out", 1))
         self.chk_blur_bg = tk.Checkbutton(
             self.bar, text="16:9 Output", variable=self.blur_bg_var,
             command=self._on_toggle_blur_bg,
@@ -221,7 +345,7 @@ class CropperApp:
             label="Blur", font=("Helvetica", 9),
             showvalue=True, length=100, command=lambda val: self._render()
         )
-        self.blur_slider.set(25)
+        self.blur_slider.set(self.prev_adj.get("blur_amount", 25))
 
         # color swatch preview (small colored label)
         self._color_swatch = tk.Label(self.bg_bar, text="  ", width=3,
@@ -299,13 +423,13 @@ class CropperApp:
         }
 
         self.maroon_slider = tk.Scale(grade_row1, label="Maroon Intensity", **slider_style)
-        self.maroon_slider.set(35)
+        self.maroon_slider.set(self.prev_adj.get("maroon_intensity", 35))
 
         self.purple_slider = tk.Scale(grade_row1, label="Purple Intensity", **slider_style)
-        self.purple_slider.set(35)
+        self.purple_slider.set(self.prev_adj.get("purple_intensity", 35))
 
         self.filter_intensity_slider = tk.Scale(grade_row2, label="Intensity", **slider_style)
-        self.filter_intensity_slider.set(50)
+        self.filter_intensity_slider.set(self.prev_adj.get("filter_intensity", 50))
 
         # Grain toggle (used by filters that support grain overlay)
         self._grain_var = tk.IntVar(value=1)
@@ -342,34 +466,91 @@ class CropperApp:
             "orient": tk.HORIZONTAL, "bg": "#16213e", "fg": "white",
             "highlightthickness": 0, "activebackground": "#533483",
             "troughcolor": "#1a1a2e", "font": ("Helvetica", 9),
-            "showvalue": True, "length": 120,
+            "showvalue": True, "length": 100,
             "command": lambda val: self._render()
         }
 
+        self.brightness_slider = tk.Scale(self._adjust_frame, label="Brightness", from_=0, to=200, **slider_style)
+        self.brightness_slider.set(self.prev_adj.get("brightness", 100))
+        self.brightness_slider.pack(side=tk.LEFT, padx=6)
+
         self.sat_slider = tk.Scale(self._adjust_frame, label="Saturation", from_=0, to=200, **slider_style)
-        self.sat_slider.set(100)
+        self.sat_slider.set(self.prev_adj.get("saturation", 100))
         self.sat_slider.pack(side=tk.LEFT, padx=6)
 
         self.contrast_slider = tk.Scale(self._adjust_frame, label="Contrast", from_=50, to=150, **slider_style)
-        self.contrast_slider.set(100)
+        self.contrast_slider.set(self.prev_adj.get("contrast", 100))
         self.contrast_slider.pack(side=tk.LEFT, padx=6)
 
+        self.shade_slider = tk.Scale(self._adjust_frame, label="Shade", from_=0, to=100, **slider_style)
+        self.shade_slider.set(self.prev_adj.get("shade", 0))
+        self.shade_slider.pack(side=tk.LEFT, padx=6)
+
         self.vignette_slider = tk.Scale(self._adjust_frame, label="Vignette", from_=0, to=100, **slider_style)
-        self.vignette_slider.set(0)
+        self.vignette_slider.set(self.prev_adj.get("vignette", 0))
         self.vignette_slider.pack(side=tk.LEFT, padx=6)
 
         self.glow_slider = tk.Scale(self._adjust_frame, label="Glow", from_=0, to=100, **slider_style)
-        self.glow_slider.set(0)
+        self.glow_slider.set(self.prev_adj.get("glow", 0))
         self.glow_slider.pack(side=tk.LEFT, padx=6)
 
         self.sparkle_slider = tk.Scale(self._adjust_frame, label="Sparkles", from_=0, to=100, **slider_style)
-        self.sparkle_slider.set(0)
+        self.sparkle_slider.set(self.prev_adj.get("sparkles", 0))
         self.sparkle_slider.pack(side=tk.LEFT, padx=6)
+
+        # ── HDR toggle checkboxes ──
+        hdr_frame = tk.Frame(self._adjust_frame, bg="#16213e")
+        hdr_frame.pack(side=tk.LEFT, padx=(12, 4))
+
+        chk_style = {
+            "font": ("Helvetica", 10), "bg": "#16213e", "fg": "white",
+            "selectcolor": "#1a1a2e", "activebackground": "#16213e",
+            "activeforeground": "white", "highlightthickness": 0, "bd": 0,
+            "cursor": "hand2"
+        }
+
+        self._hdr_thumb_var = tk.IntVar(value=self.prev_adj.get("hdr_thumbnail", 1))
+        tk.Checkbutton(
+            hdr_frame, text="HDR Thumb", variable=self._hdr_thumb_var, **chk_style
+        ).pack(anchor=tk.W)
+
+        self._hdr_video_var = tk.IntVar(value=self.prev_adj.get("hdr_video", 0))
+        tk.Checkbutton(
+            hdr_frame, text="HDR Video", variable=self._hdr_video_var, **chk_style
+        ).pack(anchor=tk.W)
 
         # ── canvas ──
         self.canvas = tk.Canvas(self.root, width=CANVAS_W, height=CANVAS_H,
                                 bg="#1a1a2e", highlightthickness=0, cursor="crosshair")
         self.canvas.pack(padx=10, pady=(0, 6))
+
+        # ── video timeline ──
+        if self.is_video:
+            self.timeline_frame = tk.Frame(self.root, bg="#1a1a2e")
+            self.timeline_frame.pack(fill=tk.X, padx=20, pady=(0, 10))
+            
+            self.time_label = tk.Label(
+                self.timeline_frame, 
+                text=f"Timeline Frame Selection: {self.selected_time:.2f}s / {self.video_duration:.2f}s",
+                font=("Helvetica", 11, "bold"), bg="#1a1a2e", fg="#8c92ac"
+            )
+            self.time_label.pack(side=tk.TOP, anchor=tk.W, pady=(0, 4))
+            
+            self.timeline_slider = tk.Scale(
+                self.timeline_frame,
+                from_=0.0,
+                to=self.video_duration,
+                resolution=0.05,
+                orient=tk.HORIZONTAL,
+                bg="#16213e", fg="white", highlightthickness=0,
+                activebackground="#533483", troughcolor="#1a1a2e",
+                font=("Helvetica", 10),
+                showvalue=False,
+                command=self._on_timeline_slide
+            )
+            self.timeline_slider.set(self.selected_time)
+            self.timeline_slider.pack(fill=tk.X, expand=True)
+            self.timeline_slider.bind("<ButtonRelease-1>", self._on_timeline_release)
 
         # ── info label ──
         self._info = tk.Label(self.root, text="", font=("Menlo", 11),
@@ -773,7 +954,7 @@ class CropperApp:
         return result
 
     def _apply_custom_adjustments(self, img):
-        """Apply manual slider adjustments (saturation, contrast, vignette, glow, sparkles) to the image."""
+        """Apply manual slider adjustments (brightness, saturation, contrast, shade, vignette, glow, sparkles) to the image."""
         if not hasattr(self, "sat_slider"):
             return img
 
@@ -787,30 +968,53 @@ class CropperApp:
         if contrast_val != 1.0:
             img = ImageEnhance.Contrast(img).enhance(contrast_val)
 
-        # 3. Glow
+        # 3. Brightness
+        if hasattr(self, "brightness_slider"):
+            brightness_val = self.brightness_slider.get() / 100.0
+            if brightness_val != 1.0:
+                img = ImageEnhance.Brightness(img).enhance(brightness_val)
+
+        # 4. Glow
         glow_val = self.glow_slider.get() / 100.0
         if glow_val > 0.0:
             img = self._add_glow(img, amount=glow_val)
 
-        # 4. Sparkles / Glint
+        # 5. Sparkles / Glint
         sparkle_val = self.sparkle_slider.get() / 100.0
         if sparkle_val > 0.0:
             img = self._add_sparkles(img, intensity=sparkle_val)
 
-        # 5. Vignette
+        # 6. Vignette
         vignette_val = self.vignette_slider.get() / 100.0
         if vignette_val > 0.0:
             img = self._add_vignette(img, strength=vignette_val * 0.85)
+
+        # 7. Shade
+        if hasattr(self, "shade_slider"):
+            shade_val = self.shade_slider.get() / 100.0
+            if shade_val > 0.0:
+                black_overlay = Image.new(img.mode, img.size, (0, 0, 0) if img.mode == "RGB" else (0, 0, 0, 255))
+                img = Image.blend(img, black_overlay, alpha=shade_val)
 
         return img
 
     def _apply_color_grade(self, img):
         """Return a new image with the current color grade and manual adjustments applied."""
+        alpha = None
+        if img.mode == "RGBA":
+            r, g, b, alpha = img.split()
+            img = Image.merge("RGB", (r, g, b))
+
         # 1. Apply preset color filter
         filtered_img = self._get_preset_filtered_image(img)
 
         # 2. Apply custom adjustments
-        return self._apply_custom_adjustments(filtered_img)
+        result = self._apply_custom_adjustments(filtered_img)
+
+        if alpha is not None:
+            result = result.convert("RGBA")
+            result.putalpha(alpha)
+        return result
 
     def _get_preset_filtered_image(self, img):
         """Return a new image with the selected preset filter applied."""
@@ -1510,9 +1714,18 @@ class CropperApp:
             "filter_intensity": self.filter_intensity_slider.get() if hasattr(self, "filter_intensity_slider") else 50,
             "saturation": self.sat_slider.get() if hasattr(self, "sat_slider") else 100,
             "contrast": self.contrast_slider.get() if hasattr(self, "contrast_slider") else 100,
+            "brightness": self.brightness_slider.get() if hasattr(self, "brightness_slider") else 100,
+            "shade": self.shade_slider.get() if hasattr(self, "shade_slider") else 0,
             "vignette": self.vignette_slider.get() if hasattr(self, "vignette_slider") else 0,
             "glow": self.glow_slider.get() if hasattr(self, "glow_slider") else 0,
             "sparkles": self.sparkle_slider.get() if hasattr(self, "sparkle_slider") else 0,
+            "bg_mode": self.bg_mode,
+            "bg_color": list(self.bg_color) if hasattr(self, "bg_color") else [30, 30, 30],
+            "blur_amount": self.blur_slider.get() if hasattr(self, "blur_slider") else 25,
+            "blur_bg_out": self.blur_bg_var.get() if hasattr(self, "blur_bg_var") else 1,
+            "hdr_thumbnail": self._hdr_thumb_var.get() if hasattr(self, "_hdr_thumb_var") else 1,
+            "hdr_video": self._hdr_video_var.get() if hasattr(self, "_hdr_video_var") else 0,
+            "selected_frame_time": self.selected_time,
         }
 
     # ── actions ────────────────────────────────────────────────────────
@@ -1528,6 +1741,47 @@ class CropperApp:
                           self.blur_bg_var.get() == 1 and 
                           self.aspect_ratio_mode == "1:1")
 
+        # Always save the 1:1 cropped square image to self.output_image_path.
+        # This keeps intermediate files clean for downstream thumbnail & video composition.
+        
+        # Burn text directly onto the cropped image
+        if self.text_overlays:
+            draw = ImageDraw.Draw(cropped)
+            for t in self.text_overlays:
+                img_font_size = max(8, int(t["size"] / self.zoom))
+                font_path = INSTAGRAM_FONTS.get(t["font"])
+                try:
+                    pil_font = ImageFont.truetype(font_path, img_font_size) if font_path and os.path.exists(font_path) else ImageFont.load_default()
+                except Exception:
+                    pil_font = ImageFont.load_default()
+
+                # Convert canvas coordinates to cropped image coordinates
+                tcx, tcy = self._i2c(t["img_x"], t["img_y"])
+                cx1, cy1 = self._i2c(self.crop_x, self.crop_y)
+                
+                if t.get("center_x"):
+                    crop_mid_x = cx1 + (self.crop_w * self.zoom) / 2.0
+                    tcx = crop_mid_x
+
+                tx = (tcx - cx1) / self.zoom
+                ty = (tcy - cy1) / self.zoom
+
+                anchor_mode = "mt" if t.get("center_x") else "lt"
+                draw.text((int(tx), int(ty)), t["text"], fill=t["color"], font=pil_font, anchor=anchor_mode)
+
+        # Determine if it's a JPEG and save with high quality
+        save_kwargs = {}
+        ext = os.path.splitext(self.output_image_path)[1].lower()
+        if ext in [".jpg", ".jpeg"]:
+            save_kwargs["quality"] = 95
+            save_kwargs["subsampling"] = 0
+
+        cropped.save(self.output_image_path, **save_kwargs)
+        cw, ch = int(self.crop_w), int(self.crop_h)
+        grade_label = f" [{self.color_grade}]" if self.color_grade != "none" else ""
+        print(f"  ✅ Cropped to {cw}×{ch}{grade_label} → {self.output_image_path}")
+
+        # If 16:9 padded is selected, also save the 16:9 padded version to a separate path
         if is_16_9_padded:
             target_w, target_h = 1920, 1080
 
@@ -1571,104 +1825,65 @@ class CropperApp:
                     except Exception:
                         pil_font = ImageFont.load_default()
 
-                    # Convert canvas text coordinates to 1920x1080 coordinates
                     tcx, tcy = self._i2c(t["img_x"], t["img_y"])
-                    
                     if t.get("center_x"):
                         crop_mid_x = cx1 + side / 2.0
                         tcx = crop_mid_x
                     
                     tx = tcx * scale_x
                     ty = tcy * scale_y
-
                     anchor_mode = "mt" if t.get("center_x") else "lt"
                     draw.text((int(tx), int(ty)), t["text"], fill=t["color"], font=pil_font, anchor=anchor_mode)
 
-            # Determine if it's a JPEG and save with high quality
-            save_kwargs = {}
-            ext = os.path.splitext(self.image_path)[1].lower()
-            if ext in [".jpg", ".jpeg"]:
-                save_kwargs["quality"] = 95
-                save_kwargs["subsampling"] = 0
-
-            bg_out.save(self.image_path, **save_kwargs)
-            grade_label = f" [{self.color_grade}]" if self.color_grade != "none" else ""
-            print(f"  ✅ Saved 16:9 image with {self.bg_mode} background{grade_label} to {self.image_path}")
-
-        else:
-            # Burn text directly onto the cropped image
-            if self.text_overlays:
-                draw = ImageDraw.Draw(cropped)
-                crop_w_px = int(self.crop_w)
-                for t in self.text_overlays:
-                    img_font_size = max(8, int(t["size"] / self.zoom))
-                    font_path = INSTAGRAM_FONTS.get(t["font"])
-                    try:
-                        pil_font = ImageFont.truetype(font_path, img_font_size) if font_path and os.path.exists(font_path) else ImageFont.load_default()
-                    except Exception:
-                        pil_font = ImageFont.load_default()
-
-                    # Convert canvas coordinates to cropped image coordinates
-                    tcx, tcy = self._i2c(t["img_x"], t["img_y"])
-                    cx1, cy1 = self._i2c(self.crop_x, self.crop_y)
-                    
-                    if t.get("center_x"):
-                        crop_mid_x = cx1 + (self.crop_w * self.zoom) / 2.0
-                        tcx = crop_mid_x
-
-                    tx = (tcx - cx1) / self.zoom
-                    ty = (tcy - cy1) / self.zoom
-
-                    anchor_mode = "mt" if t.get("center_x") else "lt"
-                    draw.text((int(tx), int(ty)), t["text"], fill=t["color"], font=pil_font, anchor=anchor_mode)
-
-            # Determine if it's a JPEG and save with high quality
-            save_kwargs = {}
-            ext = os.path.splitext(self.image_path)[1].lower()
-            if ext in [".jpg", ".jpeg"]:
-                save_kwargs["quality"] = 95
-                save_kwargs["subsampling"] = 0
-
-            cropped.save(self.image_path, **save_kwargs)
-            cw, ch = int(self.crop_w), int(self.crop_h)
-            grade_label = f" [{self.color_grade}]" if self.color_grade != "none" else ""
-            print(f"  ✅ Cropped to {cw}×{ch}{grade_label} → {self.image_path}")
+            padded_path = os.path.splitext(self.output_image_path)[0] + ".16_9.png"
+            bg_out.save(padded_path, "PNG")
+            print(f"  ✅ Saved standalone 16:9 preview with {self.bg_mode} background → {padded_path}")
 
         # Save crop information to a metadata file for video frame cropping
         import json
-        crop_info_path = self.image_path + ".crop.json"
+        crop_info_path = self.crop_json if self.crop_json else (self.output_image_path + ".crop.json")
+        crop_info_data = {
+            "x1": int(self.crop_x),
+            "y1": int(self.crop_y),
+            "x2": int(self.crop_x + self.crop_w),
+            "y2": int(self.crop_y + self.crop_h),
+            "rotation": self.rotation,
+            "color_adjustments": self._get_color_config()
+        }
         try:
-            with open(crop_info_path, "w") as f:
-                json.dump({
-                    "x1": int(self.crop_x),
-                    "y1": int(self.crop_y),
-                    "x2": int(self.crop_x + self.crop_w),
-                    "y2": int(self.crop_y + self.crop_h),
-                    "rotation": self.rotation,
-                    "color_adjustments": self._get_color_config()
-                }, f, indent=2)
+            if crop_info_path.endswith(".config.json") and os.path.exists(crop_info_path):
+                with open(crop_info_path, "r") as f:
+                    cfg_data = json.load(f)
+                cfg_data["crop_info"] = crop_info_data
+                with open(crop_info_path, "w") as f:
+                    json.dump(cfg_data, f, indent=2)
+            else:
+                with open(crop_info_path, "w") as f:
+                    json.dump(crop_info_data, f, indent=2)
         except Exception as e:
-            print(f"  ⚠️ Warning: Failed to save crop config JSON: {e}")
+            print(f"  ⚠️ Warning: Failed to save crop config: {e}")
             
         self.root.destroy()
 
     def _skip(self):
-        if self.rotation % 360 != 0:
+        if self.is_video or self.rotation % 360 != 0:
             # Determine if it's a JPEG and save with high quality
             save_kwargs = {}
-            ext = os.path.splitext(self.image_path)[1].lower()
+            ext = os.path.splitext(self.output_image_path)[1].lower()
             if ext in [".jpg", ".jpeg"]:
                 save_kwargs["quality"] = 95
                 save_kwargs["subsampling"] = 0
 
-            self.working.save(self.image_path, **save_kwargs)
-            print(f"  ↳ Saved rotated image ({self.rotation % 360}°), no crop applied.")
+            # Apply color adjustments if present before exporting skip frame
+            adjusted_working = self._apply_color_grade(self.working)
+            adjusted_working.save(self.output_image_path, **save_kwargs)
+            print(f"  ↳ Saved frame to {self.output_image_path} (no manual crop applied).")
         else:
             print("  ↳ Skipped cropping.")
 
         # Save skip information to a metadata file for video frame cropping
         import json
-        crop_info_path = self.image_path + ".crop.json"
+        crop_info_path = self.output_image_path + ".crop.json"
         try:
             with open(crop_info_path, "w") as f:
                 json.dump({
@@ -1684,11 +1899,29 @@ class CropperApp:
 
         self.root.destroy()
 
+    def _on_timeline_slide(self, val):
+        time_s = float(val)
+        self.selected_time = time_s
+        self.time_label.configure(text=f"Timeline Frame Selection: {time_s:.2f}s / {self.video_duration:.2f}s")
+
+    def _on_timeline_release(self, event):
+        print(f"  [Timeline] Extracting video frame at {self.selected_time:.3f}s...")
+        self.root.configure(cursor="watch")
+        self.root.update_idletasks()
+        
+        new_frame = self._extract_frame_at_time(self.selected_time)
+        if new_frame:
+            self.original = new_frame
+            self._update_working_image()
+            self._render()
+            
+        self.root.configure(cursor="")
+
     # ── run ────────────────────────────────────────────────────────────
 
     def run(self):
         self.root.mainloop()
-        return self.image_path
+        return self.output_image_path
 
 
 # ── helpers ────────────────────────────────────────────────────────────
@@ -1697,12 +1930,36 @@ def _snap(val, target, threshold):
     return target if abs(val - target) < threshold else val
 
 
-def crop_image(image_path, mode="1:1"):
+def crop_image(image_path, mode="1:1", crop_json=None):
     """Open the interactive cropper with the specified aspect ratio mode and return the image path."""
-    app = CropperApp(image_path, default_mode=mode)
+    app = CropperApp(image_path, default_mode=mode, crop_json=crop_json)
     return app.run()
 
 
-def crop_to_square(image_path):
+def crop_to_square(image_path, crop_json=None):
     """Open the interactive cropper defaulting to 1:1 and return the image path."""
-    return crop_image(image_path, mode="1:1")
+    # Spawn the cropper in a subprocess to prevent Tkinter multiple-root freezing issues
+    import sys
+    import subprocess
+    print(f"  [Subprocess] Spawning cropper GUI for: {os.path.basename(image_path)}")
+    cmd = [sys.executable, "cropper.py", image_path, "1:1"]
+    if crop_json:
+        cmd.append(crop_json)
+    subprocess.run(cmd)
+    
+    ext = os.path.splitext(image_path)[1].lstrip(".").lower()
+    is_video = ext in ["mp4", "mov", "webm", "gif", "avi", "mkv"]
+    if is_video:
+        return os.path.join(os.path.dirname(image_path), "_center_first_frame.png")
+    return image_path
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python3 cropper.py <image_path> [mode] [crop_json]")
+        sys.exit(1)
+    img_path = sys.argv[1]
+    mode = sys.argv[2] if len(sys.argv) > 2 else "1:1"
+    crop_json = sys.argv[3] if len(sys.argv) > 3 else None
+    crop_image(img_path, mode=mode, crop_json=crop_json)

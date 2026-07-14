@@ -25,6 +25,8 @@ def apply_color_adjustments_to_frame(img, color_adj):
     filter_intensity = color_adj.get("filter_intensity", 50)
     saturation = color_adj.get("saturation", 100)
     contrast = color_adj.get("contrast", 100)
+    brightness = color_adj.get("brightness", 100)
+    shade = color_adj.get("shade", 0)
     vignette = color_adj.get("vignette", 0)
     glow = color_adj.get("glow", 0)
     sparkles = color_adj.get("sparkles", 0)
@@ -207,29 +209,52 @@ def apply_color_adjustments_to_frame(img, color_adj):
     # 3. Contrast Slider
     if contrast != 100:
         img = ImageEnhance.Contrast(img).enhance(contrast / 100.0)
+
+    # 3b. Brightness Slider
+    if brightness != 100:
+        img = ImageEnhance.Brightness(img).enhance(brightness / 100.0)
         
     # 4. Glow Slider
     if glow > 0:
         img = _add_glow(img, glow / 100.0)
         
-    # 5. Vignette Slider
-    if vignette > 0:
-        img = _add_vignette(img, vignette / 100.0 * 0.85)
-        
-    # 6. Sparkles Slider
+    # 5. Sparkles Slider
     if sparkles > 0:
         img = _add_sparkles(img, sparkles / 100.0)
+        
+    # 6. Vignette Slider
+    if vignette > 0:
+        img = _add_vignette(img, vignette / 100.0 * 0.85)
+
+    # 7. Shade Slider
+    if shade > 0:
+        black_overlay = Image.new(img.mode, img.size, (0, 0, 0) if img.mode == "RGB" else (0, 0, 0, 255))
+        img = Image.blend(img, black_overlay, alpha=shade / 100.0)
         
     return img
 
 
-def extract_center_video_frames(video_path, target_size=660, fps=30, crop_info=None):
+def extract_center_video_frames(video_path, target_size=660, fps=30, crop_info=None, apply_hdr_video=False):
     """Extract all frames from a video/GIF, square-crop (or use crop_info), and resize to target_size.
 
     Returns a list of PIL RGBA Images ready to be pasted at the center position.
     Uses FFmpeg to extract frames at the target fps. For GIFs, uses PIL directly.
+    
+    Parameters
+    ----------
+    apply_hdr_video : bool
+        If True, applies HDR-style enhancement to each center frame after color
+        adjustments. NOTE: This is more compute-intensive than thumbnail-only HDR
+        since it processes every single video frame rather than a single still.
     """
     ext = os.path.splitext(video_path)[1].lower()
+
+    # Lazy-import HDR module only when needed to avoid import cost on static paths
+    _hdr_fn = None
+    if apply_hdr_video:
+        from hdr import apply_hdr_effect
+        _hdr_fn = apply_hdr_effect
+        print("  ↳ HDR video enhancement enabled (per-frame processing — this is compute-intensive)")
 
     # Define crop helper for a single frame
     def process_frame(frame):
@@ -265,6 +290,12 @@ def extract_center_video_frames(video_path, target_size=660, fps=30, crop_info=N
             top = (h - min_dim) // 2
             frame = frame.crop((left, top, left + min_dim, top + min_dim))
         
+        # Apply HDR enhancement per-frame if enabled
+        # NOTE: This runs on every single frame — significantly more expensive
+        # than the thumbnail-only HDR path which processes a single still image.
+        if _hdr_fn is not None:
+            frame = _hdr_fn(frame, strength=1.0)
+
         return frame.resize((target_size, target_size), Image.Resampling.LANCZOS)
 
     if ext == ".gif":
@@ -455,10 +486,18 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
         and os.path.exists(overlay_no_center_path)
     )
 
+    # HDR video enhancement flag — independent of thumbnail HDR.
+    # Default: False (disabled). Set to True in config to enable per-frame HDR.
+    apply_hdr_video = config.get("apply_hdr_video", False)
+
     if use_video_center:
         print(f"  ↳ Video center mode: {os.path.basename(center_video_path)}")
         print(f"  ↳ Pre-extracting center video frames...")
-        center_frames = extract_center_video_frames(center_video_path, target_size=660, fps=fps, crop_info=config.get("crop_info"))
+        center_frames = extract_center_video_frames(
+            center_video_path, target_size=660, fps=fps,
+            crop_info=config.get("crop_info"),
+            apply_hdr_video=apply_hdr_video
+        )
         if not center_frames:
             print("  ⚠️ No frames extracted from center video. Falling back to static mode.")
             use_video_center = False
@@ -503,7 +542,7 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
     # 4. Configure FFmpeg subprocess
     tw = profile["width"]
     th = profile["height"]
-    vf = f"scale={tw}:{th}"
+    vf = f"scale=w={tw}:h={th}:out_color_matrix=bt709:in_range=full:out_range=limited"
     
     # Check if we can use Apple hardware acceleration on macOS
     import platform
@@ -541,12 +580,15 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
         "-i", "-", # Input 0 (stdin)
         "-i", audio_path, # Input 1
         "-i", ffmpeg_overlay_path, # Input 2
-        "-filter_complex", f"[0:v][2:v]overlay=0:0,format=yuv420p,{vf}[outv]",
+        "-filter_complex", f"[0:v][2:v]overlay=0:0,{vf},format=yuv420p[outv]",
         "-map", "[outv]",
         "-map", "1:a",
     ] + codec_args + [
         "-c:a", "aac", "-b:a", "192k",
         "-pix_fmt", "yuv420p",
+        "-colorspace", "bt709",
+        "-color_trc", "bt709",
+        "-color_primaries", "bt709",
         "-shortest",
         output_path
     ]

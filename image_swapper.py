@@ -213,6 +213,9 @@ def main():
         "-c:a", "copy",
         "-c:s", "copy",
         "-pix_fmt", "yuv420p",
+        "-colorspace", "bt709",
+        "-color_trc", "bt709",
+        "-color_primaries", "bt709",
         "-shortest",
         temp_video_path
     ]

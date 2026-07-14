@@ -299,9 +299,53 @@ def create_blurred_bg(image_path, width=1920, height=1080, blur_radius=70, darke
     Scales the image to cover target canvas (16:9), applies heavy Gaussian blur,
     increases brightness and saturation, generates a bloom pass for glowing highlights,
     and applies a radial vignette that fades to black toward the edges.
+    
+    If .crop.json exists, respects custom background modes (none, solid, blur) and settings.
     """
-    print("[Step 1] Creating blurred image background...")
-    img = Image.open(image_path).convert("RGB")
+    import json
+    
+    bg_mode = "blur"
+    bg_color = (30, 30, 30)
+    custom_blur = blur_radius
+
+    crop_json_path = image_path + ".crop.json"
+    if os.path.exists(crop_json_path):
+        try:
+            with open(crop_json_path, "r") as f:
+                crop_info = json.load(f)
+                color_adj = crop_info.get("color_adjustments", {})
+                bg_mode = color_adj.get("bg_mode", "blur")
+                bg_color_val = color_adj.get("bg_color")
+                if bg_color_val:
+                    bg_color = tuple(bg_color_val)
+                custom_blur = color_adj.get("blur_amount", blur_radius)
+        except Exception as e:
+            print(f"  ⚠️ Warning: Could not read custom background settings from crop JSON: {e}")
+
+    # Solid or none backgrounds
+    if bg_mode == "solid":
+        print(f"  ↳ Solid background: {bg_color}")
+        return Image.new("RGB", (width, height), bg_color)
+    elif bg_mode == "none":
+        print(f"  ↳ Black background")
+        return Image.new("RGB", (width, height), (0, 0, 0))
+
+    print(f"[Step 1] Creating blurred image background with radius {custom_blur}...")
+    src_img = Image.open(image_path)
+    if src_img.mode in ("RGBA", "LA") or (src_img.mode == "P" and "transparency" in src_img.info):
+        rgba_img = src_img.convert("RGBA")
+        np_arr = np.array(rgba_img)
+        # Calculate average color of opaque/semi-opaque pixels (alpha > 50) to pad transparent areas
+        opaque_mask = np_arr[:, :, 3] > 50
+        if np.any(opaque_mask):
+            avg_color = tuple(np.mean(np_arr[opaque_mask][:, :3], axis=0).astype(int))
+        else:
+            avg_color = (30, 30, 30)
+        # Place the image over a solid layer of its own average color to blend corners smoothly
+        bg_layer = Image.new("RGBA", rgba_img.size, avg_color + (255,))
+        img = Image.alpha_composite(bg_layer, rgba_img).convert("RGB")
+    else:
+        img = src_img.convert("RGB")
     img_w, img_h = img.size
 
     # 1. Scale to cover the target dimensions (crop-to-fill)
@@ -325,7 +369,8 @@ def create_blurred_bg(image_path, width=1920, height=1080, blur_radius=70, darke
     img = img.crop((left, top, left + width, top + height))
 
     # 2. Apply a strong Gaussian blur
-    img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    if custom_blur > 0:
+        img = img.filter(ImageFilter.GaussianBlur(radius=custom_blur))
 
     # 3. Increase brightness and saturation
     # Apply user-specified darkening factor or default boost if darken is 1.0 (e.g. from motion_bg.py)
@@ -344,8 +389,8 @@ def create_blurred_bg(image_path, width=1920, height=1080, blur_radius=70, darke
     bright_pixels = Image.new("RGB", img.size, (0, 0, 0))
     bright_pixels.paste(img, mask=bright_mask)
     
-    # Blur the bright pixels with a larger radius (blur_radius * 1.5)
-    bloom_radius = int(blur_radius * 1.5)
+    # Blur the bright pixels with a larger radius (custom_blur * 1.5)
+    bloom_radius = max(1, int(custom_blur * 1.5))
     bright_blurred = bright_pixels.filter(ImageFilter.GaussianBlur(radius=bloom_radius))
     
     # Blend back over the background using 'screen' blend mode
@@ -381,7 +426,7 @@ def create_blurred_bg(image_path, width=1920, height=1080, blur_radius=70, darke
     black_img = Image.new("RGB", img.size, (0, 0, 0))
     img = Image.composite(black_img, img, vignette_mask)
 
-    print(f"  ↳ Blurred background with bloom and vignette created ({width}x{height}, blur={blur_radius})")
+    print(f"  ↳ Background created ({width}x{height}, mode={bg_mode}, blur={custom_blur})")
     return img
 
 
@@ -624,7 +669,7 @@ def _avg_color_of_region(canvas, x, y, w, h):
 # ── Main generation ──────────────────────────────────────────────────
 
 
-def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=None, artist=None):
+def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=None, artist=None, effects=None):
     """
     Main entry point: Generates a 1920x1080 thumbnail image.
     Uses a blurred version of the Pinterest image as the background.
@@ -663,6 +708,14 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
     print("\n[Step 0b] Locating center media...")
     chosen_center_image = pinterest_image_path
     center_video_path = None  # non-None when center is animated video/GIF
+
+    # Look for any video file in the input/ folder to see if our original media was a video/GIF
+    import glob
+    found_videos = []
+    for ext in VIDEO_EXTENSIONS:
+        found_videos.extend(glob.glob(f"input/*.{ext}"))
+    if found_videos:
+        center_video_path = found_videos[0]
 
     if not chosen_center_image or not os.path.exists(chosen_center_image):
         import glob
@@ -749,6 +802,52 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
     print("\n[Step 2] Processing central image...")
     central_img = center_crop_to_square(pint_img, target_size=660)
 
+    # ── Apply color adjustments from cropper (brightness, saturation, contrast, etc.) ──
+    # The cropper saves slider values to .crop.json but only bakes the color grade
+    # preset into the saved image file. We must apply the remaining slider adjustments
+    # here so the thumbnail matches the cropper preview exactly.
+    crop_json_path = chosen_center_image + ".crop.json"
+    apply_hdr_thumbnail = True   # default if no crop config exists
+    apply_hdr_video = False      # default if no crop config exists
+    if os.path.exists(crop_json_path):
+        try:
+            with open(crop_json_path, "r") as f:
+                crop_data = json.load(f)
+            color_adj = crop_data.get("color_adjustments")
+            if color_adj:
+                from motion_bg import apply_color_adjustments_to_frame
+                # The color grade preset is already baked into the saved image by
+                # cropper.py's _do_crop(). Override to "none" to avoid double-applying
+                # the preset — we only want the slider adjustments here.
+                adj_for_thumb = dict(color_adj)
+                adj_for_thumb["color_grade"] = "none"
+                print("  ↳ Applying cropper color adjustments (brightness, saturation, contrast, shade, glow, sparkles)...")
+                alpha = None
+                if central_img.mode == "RGBA":
+                    r, g, b, alpha = central_img.split()
+                    central_img = Image.merge("RGB", (r, g, b))
+
+                central_img = apply_color_adjustments_to_frame(central_img, adj_for_thumb)
+
+                if alpha is not None:
+                    central_img = central_img.convert("RGBA")
+                    central_img.putalpha(alpha)
+                # Read HDR flags set by the user in the cropper GUI
+                apply_hdr_thumbnail = bool(color_adj.get("hdr_thumbnail", 1))
+                apply_hdr_video = bool(color_adj.get("hdr_video", 0))
+        except Exception as e:
+            print(f"  ⚠️ Warning: Could not apply color adjustments from crop config: {e}")
+
+    # ── HDR Enhancement (thumbnail) ──
+    # Controlled by hdr_thumbnail checkbox in the cropper (default: on).
+    # Applied to the center image BEFORE compositing onto the blurred background.
+    if apply_hdr_thumbnail:
+        from hdr import apply_hdr_effect
+        print("  ↳ Applying HDR enhancement to central image...")
+        central_img = apply_hdr_effect(central_img, strength=1.0)
+    else:
+        print("  ↳ HDR thumbnail: disabled")
+
     # ── Step 3: Brightness glow (optional) ──
     if use_glow:
         print("[Step 3] Adding brightness glow...")
@@ -776,7 +875,8 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
     print("  1) Moontime (Elegant Cursive) [Default]")
     print("  2) UnifrakturCook (Vintage Blackletter)")
     print("  3) Rock Salt (Handwritten Brush)")
-    font_choice = input("Enter 1, 2, or 3 [default 1]: ").strip()
+    print("  4) Racing Sans One (Sporty Bold)")
+    font_choice = input("Enter 1, 2, 3, or 4 [default 1]: ").strip()
 
     if font_choice == "2":
         font_path = "assets/fonts/UnifrakturCook.ttf"
@@ -787,6 +887,11 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
         font_path = "assets/fonts/RockSalt.ttf"
         if not os.path.exists(font_path):
             print("  ⚠️ RockSalt font file missing. Using Moontime.")
+            font_path = "assets/fonts/Moontime.ttf"
+    elif font_choice == "4":
+        font_path = "assets/fonts/RacingSansOne-Regular.ttf"
+        if not os.path.exists(font_path):
+            print("  ⚠️ Racing Sans One font file missing. Using Moontime.")
             font_path = "assets/fonts/Moontime.ttf"
     else:
         font_path = "assets/fonts/Moontime.ttf"
@@ -805,6 +910,23 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
         # Fallback if no font file can be loaded
         title_font = ImageFont.load_default()
         artist_font = ImageFont.load_default()
+
+    # Prompt layout choice
+    print("\nSelect text layout for the thumbnail:")
+    print("  1) Top/Bottom margins [Default]")
+    print("  2) Stacked in the center overlaying the image")
+    layout_choice = input("Enter 1 or 2 [default 1]: ").strip()
+    if layout_choice not in ["1", "2"]:
+        layout_choice = "1"
+
+    center_text_size = 115
+    if layout_choice == "2":
+        size_in = input("Enter font size for centered text (e.g. 50-200) [default 115]: ").strip()
+        if size_in:
+            try:
+                center_text_size = int(size_in)
+            except ValueError:
+                pass
 
     # ── Step 5: Text color calculation ──
     print("[Step 5] Computing text colors...")
@@ -851,11 +973,96 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
     central_y = (1080 - 660) // 2
     overlay.paste(central_rgba, (central_x, central_y), central_rgba)
 
-    # Draw gradient texts onto overlay
-    draw_gradient_text(overlay, title, title_font, 960, 105, title_start, title_end, anchor="mm", stroke_width=1)
-    draw_gradient_text(overlay, artist, artist_font, 960, 975, artist_start, artist_end, anchor="mm", stroke_width=1)
+    # Draw text layout
+    if layout_choice == "2":
+        # Centered layout: use effects instead of artist, keeping case as in screenshot
+        if effects:
+            text_to_draw = f"{title}\n{effects.lower()}"
+        else:
+            text_to_draw = f"{title}\n{artist}" if artist else title
+        
+        # Scale center font to fit the 660px center square comfortably (max 580px width)
+        longest_line = max(text_to_draw.split("\n"), key=len)
+        if font_path:
+            center_font = get_scaled_font(font_path, longest_line, max_width=580, default_size=center_text_size)
+        else:
+            center_font = ImageFont.load_default()
+            
+        # Sample average color of the center image area to calculate pop/contrast colors
+        center_bg = _avg_color_of_region(canvas_rgb, 630, 210, 660, 660)
+        # Calculate luminance (0.299*R + 0.587*G + 0.114*B)
+        lum = 0.299 * center_bg[0] + 0.587 * center_bg[1] + 0.114 * center_bg[2]
+        
+        if lum > 150:
+            # Light background -> dark text with white soft glow shadow
+            text_color = (25, 25, 25, 255)
+            shadow_color = (255, 255, 255)  # White glow
+        else:
+            # Dark background -> white text with black soft glow shadow
+            text_color = (255, 255, 255, 255)
+            shadow_color = (0, 0, 0)        # Black glow
+            
+        # Draw soft Gaussian-blurred glow shadow behind center text
+        # 1. Create local L mask image for the text block
+        # We need to measure the text box bounds first
+        dummy = Image.new("L", (1, 1))
+        dummy_draw = ImageDraw.Draw(dummy)
+        bbox = dummy_draw.multiline_textbbox((0, 0), text_to_draw, font=center_font, anchor="mm", align="center", spacing=12)
+        left, top, right, bottom = bbox
+        text_w = right - left
+        text_h = bottom - top
+        
+        if text_w > 0 and text_h > 0:
+            blur_radius = 12
+            margin = int(blur_radius * 2.5) + 20
+            mask_w = int(text_w + 2 * margin)
+            mask_h = int(text_h + 2 * margin)
+            
+            # Generate shadow mask
+            shadow_mask = Image.new("L", (mask_w, mask_h), 0)
+            mask_draw = ImageDraw.Draw(shadow_mask)
+            
+            # Position shifted to fit inside mask
+            text_x = int(margin - left)
+            text_y = int(margin - top)
+            mask_draw.multiline_text(
+                (text_x, text_y),
+                text_to_draw,
+                fill=220, # shadow opacity (~86%)
+                font=center_font,
+                anchor="mm",
+                align="center",
+                spacing=12
+            )
+            
+            # Apply Gaussian blur to the mask to get the soft glow shadow
+            shadow_mask = shadow_mask.filter(ImageFilter.GaussianBlur(blur_radius))
+            
+            # Create color fill for the shadow
+            shadow_color_fill = Image.new("RGBA", (mask_w, mask_h), shadow_color + (255,))
+            
+            # Paste the shadow onto the overlay
+            paste_x = int(960 + left - margin)
+            paste_y = int(540 + top - margin)
+            overlay.paste(shadow_color_fill, (paste_x, paste_y), shadow_mask)
+            
+        # 2. Draw clean main text on top (no outline stroke)
+        draw_ov = ImageDraw.Draw(overlay)
+        draw_ov.multiline_text(
+            (960, 540),
+            text_to_draw,
+            fill=text_color,
+            font=center_font,
+            anchor="mm",
+            align="center",
+            spacing=12
+        )
+    else:
+        # Standard Top/Bottom layout on thumbnail overlay
+        draw_gradient_text(overlay, title, title_font, 960, 105, title_start, title_end, anchor="mm", stroke_width=1)
+        draw_gradient_text(overlay, artist, artist_font, 960, 975, artist_start, artist_end, anchor="mm", stroke_width=1)
 
-    # Also draw text onto overlay_no_center if video center
+    # For the video overlay (overlay_no_center), we ALWAYS write top/bottom layout (as requested: only for the thumbnail)
     if center_video_path:
         draw_gradient_text(overlay_no_center, title, title_font, 960, 105, title_start, title_end, anchor="mm", stroke_width=1)
         draw_gradient_text(overlay_no_center, artist, artist_font, 960, 975, artist_start, artist_end, anchor="mm", stroke_width=1)
@@ -890,6 +1097,10 @@ def generate_thumbnail(youtube_url, pinterest_image_path, output_path, title=Non
             "center_video": None,
             "overlay_no_center": None,
             "crop_info": None,
+            # HDR flags — independent of each other.
+            # apply_hdr_thumbnail is handled above at compositing time.
+            # apply_hdr_video is passed through to motion_bg.py for per-frame processing.
+            "apply_hdr_video": apply_hdr_video,
         }
 
         # If crop config exists, load and embed it

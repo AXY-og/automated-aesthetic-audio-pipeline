@@ -109,6 +109,9 @@ def burn_subtitles_from_lrc(video_path, lrc_text, output_path, speed_factor=1.0)
             "-bufsize", profile["bufsize"],
             "-c:a", "copy",
             "-pix_fmt", "yuv420p",
+            "-colorspace", "bt709",
+            "-color_trc", "bt709",
+            "-color_primaries", "bt709",
             output_path
         ], check=True)
         return True
