@@ -863,11 +863,6 @@ def download_youtube_audio(url):
         "quiet": False,
         "no_warnings": True,
         "noplaylist": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["ios", "tv"]
-            }
-        },
         "nocheckcertificate": True,
     }
     
