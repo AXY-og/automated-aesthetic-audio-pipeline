@@ -958,6 +958,75 @@ def extract_youtube_video_id(url):
         return match.group(1)
     return None
 
+def download_via_proxy(url):
+    import urllib.request
+    import random
+    import os
+    
+    print("  🌐 Fetching fresh HTTP proxies list...")
+    try:
+        req = urllib.request.Request(
+            "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            proxies = response.read().decode("utf-8").strip().split("\n")
+        random.shuffle(proxies)
+        print(f"  Loaded {len(proxies)} proxies.")
+    except Exception as e:
+        print(f"  ⚠️ Failed to load proxy list: {e}")
+        return None, None
+
+    # Try up to 25 proxies in sequence
+    for proxy in proxies[:25]:
+        proxy = proxy.strip()
+        if not proxy:
+            continue
+            
+        proxy_url = f"http://{proxy}"
+        print(f"  Trying download via proxy: {proxy_url}")
+        
+        opts = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(INPUT_DIR, "%(title)s.%(ext)s"),
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "wav",
+            }],
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "nocheckcertificate": True,
+            "proxy": proxy_url,
+            "socket_timeout": 8,
+        }
+        
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            opts["impersonate"] = ImpersonateTarget.from_str("chrome-110:windows-10")
+        except Exception:
+            pass
+            
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                title = info.get("title", "audio")
+                
+            yt_meta = {
+                "yt_title": title,
+                "artist": info.get("artist", "") or info.get("uploader", ""),
+                "channel": info.get("channel", "") or info.get("uploader", ""),
+                "channel_url": info.get("channel_url", "") or info.get("uploader_url", ""),
+            }
+            downloaded = os.path.join(INPUT_DIR, f"{title}.wav")
+            if os.path.exists(downloaded):
+                print(f"  ✅ Download successful via proxy: {proxy_url}")
+                return downloaded, yt_meta
+        except Exception as e:
+            print(f"    ⚠️ Proxy {proxy_url} failed: {e}")
+            
+    return None, None
+
 def download_via_invidious(youtube_url):
     import json
     import urllib.request
@@ -1111,8 +1180,16 @@ def download_youtube_audio(url):
 
     except Exception as primary_err:
         print(f"  ⚠️ yt-dlp failed (likely YouTube bot check block): {primary_err}")
-        print(f"  🔄 Falling back to Invidious API first...")
+        print(f"  🔄 Falling back to HTTP proxy list bypass...")
         
+        try:
+            downloaded, yt_meta = download_via_proxy(url)
+            if downloaded and yt_meta:
+                return downloaded, yt_meta
+        except Exception as proxy_err:
+            print(f"  ⚠️ Proxy download failed: {proxy_err}")
+
+        print(f"  🔄 Falling back to Invidious API...")
         try:
             stream_url, yt_meta = download_via_invidious(url)
             if stream_url and yt_meta:
