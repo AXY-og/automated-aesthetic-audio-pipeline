@@ -200,20 +200,40 @@ def download_pinterest_media(url):
         for mp4 in mp4s:
             video_urls.add(mp4)
 
-    # Resolve selection
+    # Resolve selection using meta tags first (guarantees correct pin selection)
     chosen_url = None
     is_video = False
     
-    if video_urls:
-        # Prioritize 720p or mp4 video files
-        sorted_videos = sorted(list(video_urls), key=lambda x: ("720p" in x or "720" in x or "v720p" in x), reverse=True)
-        chosen_url = sorted_videos[0]
+    # Try finding main og:video or og:image from raw HTML first
+    og_video_match = re.search(r'<meta[^>]+(?:property|name)=["\']og:video["\'][^>]+content=["\']([^"\']+)["\']', html) or \
+                     re.search(r'<meta[^>]+content=["\']([^"\']+)["\']?[^>]+(?:property|name)=["\']og:video["\']', html)
+    og_image_match = re.search(r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html) or \
+                     re.search(r'<meta[^>]+content=["\']([^"\']+)["\']?[^>]+(?:property|name)=["\']og:image["\']', html)
+                     
+    if og_video_match:
+        chosen_url = og_video_match.group(1)
         is_video = True
-        print(f"  ↳ Selected video URL: {chosen_url}")
-    elif image_urls:
-        chosen_url = list(image_urls)[0]
-        print(f"  ↳ Selected original image URL: {chosen_url}")
+        print(f"  ↳ Selected video URL (via og:video): {chosen_url}")
+    elif og_image_match:
+        img_url = og_image_match.group(1)
+        for size in ["/736x/", "/564x/", "/236x/", "/474x/"]:
+            if size in img_url:
+                img_url = img_url.replace(size, "/originals/")
+                break
+        chosen_url = img_url
+        print(f"  ↳ Selected original image URL (via og:image): {chosen_url}")
         
+    if not chosen_url:
+        # Fallback to broad regex scraping if meta tags failed
+        if video_urls:
+            sorted_videos = sorted(list(video_urls), key=lambda x: ("720p" in x or "720" in x or "v720p" in x), reverse=True)
+            chosen_url = sorted_videos[0]
+            is_video = True
+            print(f"  ↳ Selected video URL (via fallback): {chosen_url}")
+        elif image_urls:
+            chosen_url = list(image_urls)[0]
+            print(f"  ↳ Selected original image URL (via fallback): {chosen_url}")
+            
     if not chosen_url:
         print("  ❌ No images or videos could be extracted from Pinterest page.")
         return None
