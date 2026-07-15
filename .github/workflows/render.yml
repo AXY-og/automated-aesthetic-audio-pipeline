@@ -51,7 +51,7 @@ jobs:
             echo "✅ Rotated YouTube OAuth credentials token secret."
           fi
 
-      - name: Upload result artifacts
+      - name: Upload result metadata artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -59,4 +59,12 @@ jobs:
           path: |
             output/result.json
             output/*.png
+            output/*.jpg
+
+      - name: Upload heavy video artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-video-${{ github.event.client_payload.payload.job_id }}
+          path: |
             output/*.mp4
