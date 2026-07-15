@@ -1006,11 +1006,7 @@ def download_via_proxy(url):
             },
         }
         
-        try:
-            from yt_dlp.networking.impersonate import ImpersonateTarget
-            opts["impersonate"] = ImpersonateTarget.from_str("chrome-110:windows-10")
-        except Exception:
-            pass
+        # No browser impersonation when using mobile player clients
             
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -1215,11 +1211,7 @@ def download_youtube_audio(url, direct_audio_url=None):
             },
         }
         
-        try:
-            from yt_dlp.networking.impersonate import ImpersonateTarget
-            opts["impersonate"] = ImpersonateTarget.from_str("chrome-110:windows-10")
-        except Exception as e:
-            print(f"⚠️ Could not set yt-dlp impersonation: {e}")
+        # No browser impersonation when using mobile player clients
             
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
