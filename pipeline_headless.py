@@ -74,10 +74,25 @@ def burn_text_overlays(img, text_overlays):
             continue
 
         size = max(12, int(t.get("size", 36)))
+        font_name = t.get("font", "Classic")
+        font_path = None
+        
+        if font_name in ["Moontime", "Classic"]:
+            font_path = "assets/fonts/Moontime.ttf"
+        elif font_name in ["UnifrakturCook", "Vintage"]:
+            font_path = "assets/fonts/UnifrakturCook.ttf"
+        elif font_name in ["Rock Salt", "Brush"]:
+            font_path = "assets/fonts/RockSalt.ttf"
+        elif font_name in ["Racing Sans One", "Sporty"]:
+            font_path = "assets/fonts/RacingSansOne-Regular.ttf"
+
+        if not font_path or not os.path.exists(font_path):
+            font_path = fallback_font_path
+
         pil_font = None
-        if fallback_font_path:
+        if font_path:
             try:
-                pil_font = ImageFont.truetype(fallback_font_path, size)
+                pil_font = ImageFont.truetype(font_path, size)
             except Exception:
                 pass
         if not pil_font:
@@ -326,7 +341,7 @@ def main():
             use_glow=True,       # default true
             use_vignette=True,   # default true
             custom_text_rgb=None,
-            font_choice="1",     # default Moontime
+            font_choice=config.get("font_choice", "1"),     # loaded from payload config
             layout_choice=layout_choice,
             crop_info=crop_info,
             interactive=False
