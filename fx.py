@@ -48,13 +48,39 @@ def download_pinterest_media(url):
     
     # Resolve redirect if pin.it
     if "pin.it" in url or "/pin/" not in url:
-        req = urllib.request.Request(url, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=10) as response:
-                url = response.geturl()
-                print(f"  ↳ Resolved short URL to: {url}")
-        except Exception as e:
-            print(f"  ⚠️ Redirect resolution failed: {e}")
+        import urllib.error
+        current_url = url
+        for _ in range(10):  # Follow up to 10 redirect hops
+            req = urllib.request.Request(current_url, headers=headers, method="HEAD")
+            try:
+                class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+                    def http_error_301(self, req, fp, code, msg, hdrs): return None
+                    def http_error_302(self, req, fp, code, msg, hdrs): return None
+                    def http_error_303(self, req, fp, code, msg, hdrs): return None
+                    def http_error_307(self, req, fp, code, msg, hdrs): return None
+                    def http_error_308(self, req, fp, code, msg, hdrs): return None
+                
+                opener = urllib.request.build_opener(NoRedirectHandler)
+                with opener.open(req, timeout=10) as response:
+                    loc = response.headers.get("Location")
+                    if loc:
+                        current_url = urllib.parse.urljoin(current_url, loc)
+                        continue
+                    current_url = response.geturl()
+                    break
+            except urllib.error.HTTPError as e:
+                if e.code in [301, 302, 303, 307, 308]:
+                    loc = e.headers.get("Location")
+                    if loc:
+                        current_url = urllib.parse.urljoin(current_url, loc)
+                        continue
+                print(f"  ⚠️ Redirect resolution HTTP error: {e}")
+                break
+            except Exception as e:
+                print(f"  ⚠️ Redirect resolution network error: {e}")
+                break
+        url = current_url
+        print(f"  ↳ Resolved short URL to: {url}")
 
     # ── Attempt download using yt-dlp first (handles cookies, videos, streams dynamically) ──
     import subprocess
