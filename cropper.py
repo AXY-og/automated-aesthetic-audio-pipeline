@@ -551,6 +551,30 @@ class CropperApp:
             self.timeline_slider.set(self.selected_time)
             self.timeline_slider.pack(fill=tk.X, expand=True)
             self.timeline_slider.bind("<ButtonRelease-1>", self._on_timeline_release)
+            
+            # Video Speed Factor Slider (Slow-mo)
+            speed_frame = tk.Frame(self.timeline_frame, bg="#1a1a2e")
+            speed_frame.pack(fill=tk.X, pady=(6, 0))
+            
+            tk.Label(
+                speed_frame, 
+                text="Video Speed Factor (Slow-mo):",
+                font=("Helvetica", 10, "bold"), bg="#1a1a2e", fg="#8c92ac"
+            ).pack(side=tk.LEFT, padx=(0, 10))
+            
+            self.speed_slider = tk.Scale(
+                speed_frame,
+                from_=0.25,
+                to=1.00,
+                resolution=0.05,
+                orient=tk.HORIZONTAL,
+                bg="#16213e", fg="white", highlightthickness=0,
+                activebackground="#533483", troughcolor="#1a1a2e",
+                font=("Helvetica", 9),
+                showvalue=True, length=200
+            )
+            self.speed_slider.set(self.prev_adj.get("video_speed", 1.0))
+            self.speed_slider.pack(side=tk.LEFT)
 
         # ── info label ──
         self._info = tk.Label(self.root, text="", font=("Menlo", 11),
@@ -1726,6 +1750,7 @@ class CropperApp:
             "hdr_thumbnail": self._hdr_thumb_var.get() if hasattr(self, "_hdr_thumb_var") else 1,
             "hdr_video": self._hdr_video_var.get() if hasattr(self, "_hdr_video_var") else 0,
             "selected_frame_time": self.selected_time,
+            "video_speed": self.speed_slider.get() if hasattr(self, "speed_slider") else 1.0,
         }
 
     # ── actions ────────────────────────────────────────────────────────

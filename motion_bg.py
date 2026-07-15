@@ -316,14 +316,30 @@ def extract_center_video_frames(video_path, target_size=660, fps=30, crop_info=N
     # For video files, use FFmpeg to dump frames to a temp directory
     tmp_dir = tempfile.mkdtemp(prefix="xenia_frames_")
     try:
+        color_adj = crop_info.get("color_adjustments") if crop_info else None
+        speed = 1.0
+        if color_adj:
+            try:
+                speed = float(color_adj.get("video_speed", 1.0))
+            except Exception:
+                speed = 1.0
+
+        vf_filters = []
+        if speed != 1.0 and speed > 0.0:
+            print(f"  ↳ Smooth video slowing enabled: speed factor = {speed}x with frame blending motion blur")
+            vf_filters.append(f"setpts=PTS/{speed}")
+            vf_filters.append(f"minterpolate=fps={fps}:mi_mode=blend")
+        else:
+            vf_filters.append(f"fps={fps}")
+
         cmd = [
             "ffmpeg", "-y",
             "-i", video_path,
-            "-vf", f"fps={fps}",
+            "-vf", ",".join(vf_filters),
             "-q:v", "2",
             os.path.join(tmp_dir, "frame_%05d.png")
         ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=180)
 
         # Load all frames
         frame_files = sorted([
