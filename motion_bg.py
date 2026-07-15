@@ -665,8 +665,8 @@ def render_motion_video(audio_path, output_path, profile, config_path, fps=30):
                 sys.stdout.write(f"\r    [Progress] Frame {n+1}/{total_frames} ({pct:.1f}%) | Speed: {fps_render:.1f} fps | ETA: {eta:.1f}s   ")
                 sys.stdout.flush()
                 
-        print("\n  ↳ Closing stream and finalizing video encoding...")
-        proc.stdin.close()
+        # communicate() will close stdin automatically
+        pass
         
     except Exception as e:
         print(f"\n  ❌ Render error occurred: {e}")
